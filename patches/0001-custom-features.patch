@@ -2253,7 +2253,7 @@ index a1e5ece..11b6e9d 100644
 +				[=] { state->userpic.update(); },
 +				0.,
 +				1.,
-+				crlduration_t(450));
++				crl::time(450));
 +		}
 +		state->lastPersonal = now;
 +		state->userpic.update();
