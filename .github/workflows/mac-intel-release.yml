@@ -14,6 +14,11 @@ jobs:
       UPLOAD_ARTIFACT: "true"
       PREPARE_PATH: "Telegram/build/prepare/prepare.py"
       UPSTREAM_SHA: "f4be0fac81507efa591db397489e255143a0c321"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 4G
+      CCACHE_COMPRESS: "true"
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: time_macros,pch_defines,include_file_mtime
     steps:
       - name: Checkout patches
         uses: actions/checkout@v4
@@ -34,12 +39,22 @@ jobs:
         run: |
           set -euo pipefail
           cd tdesktop
+          git apply --check --whitespace=nowarn ../overlay/patches/0001-custom-features.patch
           git apply --whitespace=nowarn ../overlay/patches/0001-custom-features.patch
           test -f Telegram/SourceFiles/custom/custom_import.cpp
           test -f Telegram/SourceFiles/custom/custom_export.cpp
           test -f Telegram/SourceFiles/custom/custom_account_rail.cpp
           test -f Telegram/SourceFiles/custom/custom_search_panel.cpp
           echo "patch applied"
+
+      - name: Homebrew cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Logs/Homebrew
+          key: brew-${{ runner.os }}-v1
+          restore-keys: brew-${{ runner.os }}-v1
 
       - name: First set up
         env:
@@ -48,10 +63,11 @@ jobs:
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
         run: |
           sudo chown -R `whoami`:admin /usr/local/share || true
-          brew install automake libtool meson nasm ninja pkg-config
+          brew install automake libtool meson nasm ninja pkg-config ccache
           sudo mdutil -a -i off || true
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' /opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake || true
+          ccache --zero-stats || true
 
       - name: Libraries cache
         id: cache-libs
@@ -60,10 +76,19 @@ jobs:
           path: |
             Libraries
             ThirdParty
-          key: ${{ runner.OS }}-libs-debug-${{ env.UPSTREAM_SHA }}
+          key: ${{ runner.os }}-libs-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('tdesktop/Telegram/build/prepare/prepare.py') }}
           restore-keys: |
-            ${{ runner.OS }}-libs-debug-
-            ${{ runner.OS }}-libs-
+            ${{ runner.os }}-libs-debug-${{ env.UPSTREAM_SHA }}-
+            ${{ runner.os }}-libs-debug-
+            ${{ runner.os }}-libs-
+
+      - name: Libraries cache status
+        run: |
+          if [ "${{ steps.cache-libs.outputs.cache-hit }}" = "true" ]; then
+            echo "::notice::Libraries cache HIT — skipping most of prepare"
+          else
+            echo "::notice::Libraries cache MISS — full prepare (will save after this step)"
+          fi
 
       - name: Libraries
         run: |
@@ -81,6 +106,25 @@ jobs:
             ThirdParty
           key: ${{ steps.cache-libs.outputs.cache-primary-key }}
 
+      - name: Compile cache (ccache)
+        id: cache-ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-
+            ${{ runner.os }}-ccache-debug-
+
+      - name: Compile cache status
+        run: |
+          if [ "${{ steps.cache-ccache.outputs.cache-hit }}" = "true" ]; then
+            echo "::notice::ccache HIT — incremental compile should be faster"
+          else
+            echo "::notice::ccache MISS — cold compile"
+          fi
+          ccache -s || true
+
       - name: Telegram Desktop build
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "4"
@@ -88,16 +132,30 @@ jobs:
           cd tdesktop/Telegram
           echo "ARTIFACT_NAME=CustomTelegram" >> "$GITHUB_ENV"
           ls -l ../../Libraries/local/Qt-*/lib/*.a | head
+          CLANG="$(xcrun --find clang)"
+          CLANGXX="$(xcrun --find clang++)"
           ./configure.sh \
             -D CMAKE_CONFIGURATION_TYPES=Debug \
             -D CMAKE_OSX_ARCHITECTURES=x86_64 \
             -D DESKTOP_APP_MAC_ARCH=x86_64 \
             -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -D CMAKE_XCODE_ATTRIBUTE_CC="ccache ${CLANG}" \
+            -D CMAKE_XCODE_ATTRIBUTE_CXX="ccache ${CLANGXX}" \
+            -D CMAKE_XCODE_ATTRIBUTE_LD="ccache ${CLANG}" \
+            -D CMAKE_XCODE_ATTRIBUTE_LDPLUSPLUS="ccache ${CLANGXX}" \
             -D TDESKTOP_API_ID=2040 \
             -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 \
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
           cmake --build ../out --config Debug --parallel
+          ccache -s
+
+      - name: Save compile cache
+        if: always() && steps.cache-ccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ steps.cache-ccache.outputs.cache-primary-key }}
 
       - name: Move artifact
         run: |
