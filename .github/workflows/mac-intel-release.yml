@@ -118,10 +118,43 @@ jobs:
           df -h /
 
       - name: Libraries
-        timeout-minutes: 100
+        timeout-minutes: 180
         run: |
+          set -euo pipefail
           defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasks -int 3
-          ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent
+          LOG="$RUNNER_TEMP/libraries.log"
+          touch "$LOG"
+          # OpenSSL prints a full cc command for every file. After about 2 MB,
+          # GitHub stops reading the step log and clang blocks on that pipe.
+          ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent >"$LOG" 2>&1 &
+          pid=$!
+          last=0
+          still=0
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 30
+            now=$(wc -c <"$LOG" | tr -d ' ')
+            echo "$(date -u +%H:%M:%S) libraries pid=$pid bytes=$now"
+            if [ "$now" = "$last" ]; then
+              still=$((still + 30))
+            else
+              still=0
+              last=$now
+            fi
+            if [ "$still" -ge 480 ]; then
+              echo "libraries produced no output for 8 minutes"
+              tail -n 30 "$LOG" | cut -c1-200
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" || true
+              exit 1
+            fi
+          done
+          set +e
+          wait "$pid"
+          code=$?
+          set -e
+          echo "libraries exit $code bytes=$(wc -c <"$LOG" | tr -d ' ')"
+          tail -n 40 "$LOG" | cut -c1-200
+          exit "$code"
 
       - name: Free up some disk space
         run: |
@@ -185,8 +218,38 @@ jobs:
             -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 \
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
-          cmake --build ../out --config Debug --parallel
+          LOG="$RUNNER_TEMP/telegram-build.log"
+          touch "$LOG"
+          cmake --build ../out --config Debug --parallel >"$LOG" 2>&1 &
+          pid=$!
+          last=0
+          still=0
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 30
+            now=$(wc -c <"$LOG" | tr -d ' ')
+            echo "$(date -u +%H:%M:%S) telegram pid=$pid bytes=$now"
+            if [ "$now" = "$last" ]; then
+              still=$((still + 30))
+            else
+              still=0
+              last=$now
+            fi
+            if [ "$still" -ge 480 ]; then
+              echo "telegram build produced no output for 8 minutes"
+              tail -n 40 "$LOG" | cut -c1-200
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" || true
+              exit 1
+            fi
+          done
+          set +e
+          wait "$pid"
+          code=$?
+          set -e
+          echo "telegram build exit $code bytes=$(wc -c <"$LOG" | tr -d ' ')"
+          tail -n 50 "$LOG" | cut -c1-200
           ccache -s
+          exit "$code"
 
       - name: Save compile cache
         if: success() && steps.cache-ccache.outputs.cache-hit != 'true'
