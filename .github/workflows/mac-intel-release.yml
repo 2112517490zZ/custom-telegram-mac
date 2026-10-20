@@ -34,6 +34,9 @@ jobs:
           cd tdesktop
           git apply --whitespace=nowarn ../overlay/patches/0001-custom-features.patch
           test -f Telegram/SourceFiles/custom/custom_import.cpp
+          test -f Telegram/SourceFiles/custom/custom_export.cpp
+          test -f Telegram/SourceFiles/custom/custom_account_rail.cpp
+          test -f Telegram/SourceFiles/custom/custom_search_panel.cpp
           echo "patch applied"
 
       - name: First set up
@@ -61,7 +64,7 @@ jobs:
           ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent
 
       - name: Free up some disk space
-          run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+        run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
 
       - name: Telegram Desktop build
         run: |
