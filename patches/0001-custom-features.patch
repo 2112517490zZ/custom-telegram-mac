@@ -1759,7 +1759,7 @@ index 06abb65..1362562 100644
  
 +int Session::personalUnreadBadge() const {
 +	auto result = 0;
-+	const auto addList = [&](not_null<Dialogs::IndexedList*> list) {
++	const auto addList = [&](not_null<const Dialogs::IndexedList*> list) {
 +		for (const auto &row : *list) {
 +			const auto history = row->history();
 +			if (!history || !Custom::IsPersonalUser(history->peer)) {
