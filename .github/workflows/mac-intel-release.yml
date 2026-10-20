@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: overlay
+          fetch-depth: 1
 
       - name: Clone 64Gram
         uses: actions/checkout@v4
@@ -26,6 +27,7 @@ jobs:
           repository: TDesktop-x64/tdesktop
           ref: ${{ env.UPSTREAM_SHA }}
           submodules: recursive
+          fetch-depth: 1
           path: tdesktop
 
       - name: Apply custom features
@@ -40,10 +42,12 @@ jobs:
           echo "patch applied"
 
       - name: First set up
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
         run: |
           sudo chown -R `whoami`:admin /usr/local/share || true
-          brew update
-          brew upgrade || true
           brew install automake libtool meson nasm ninja pkg-config
           sudo mdutil -a -i off || true
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
@@ -67,6 +71,8 @@ jobs:
         run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
 
       - name: Telegram Desktop build
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "4"
         run: |
           cd tdesktop/Telegram
           echo "ARTIFACT_NAME=CustomTelegram" >> "$GITHUB_ENV"
