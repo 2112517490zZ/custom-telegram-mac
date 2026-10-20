@@ -4,6 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'
 
 jobs:
   macos:
@@ -48,13 +50,13 @@ jobs:
           echo "patch applied"
 
       - name: Homebrew cache
-        uses: actions/cache@v4
+        id: cache-brew
+        uses: actions/cache/restore@v4
         with:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Logs/Homebrew
           key: brew-${{ runner.os }}-v1
-          restore-keys: brew-${{ runner.os }}-v1
 
       - name: First set up
         env:
@@ -67,11 +69,20 @@ jobs:
           sudo mdutil -a -i off || true
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
           sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' /opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake || true
-          ccache --zero-stats || true
+
+      - name: Save Homebrew cache
+        if: steps.cache-brew.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Logs/Homebrew
+          key: brew-${{ runner.os }}-v1
 
       - name: Libraries cache
         id: cache-libs
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             Libraries
@@ -85,9 +96,9 @@ jobs:
       - name: Libraries cache status
         run: |
           if [ "${{ steps.cache-libs.outputs.cache-hit }}" = "true" ]; then
-            echo "::notice::Libraries cache HIT — skipping most of prepare"
+            echo "::notice::Libraries cache HIT"
           else
-            echo "::notice::Libraries cache MISS — full prepare (will save after this step)"
+            echo "::notice::Libraries cache MISS — full prepare, then save before compile"
           fi
 
       - name: Libraries
@@ -95,20 +106,23 @@ jobs:
           ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent
 
       - name: Free up some disk space
-        run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+        run: |
+          find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+          du -sh Libraries ThirdParty || true
 
       - name: Save Libraries cache
         if: steps.cache-libs.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: |
             Libraries
             ThirdParty
-          key: ${{ steps.cache-libs.outputs.cache-primary-key }}
+          key: ${{ runner.os }}-libs-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('tdesktop/Telegram/build/prepare/prepare.py') }}
 
       - name: Compile cache (ccache)
         id: cache-ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
           key: ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
@@ -119,30 +133,36 @@ jobs:
       - name: Compile cache status
         run: |
           if [ "${{ steps.cache-ccache.outputs.cache-hit }}" = "true" ]; then
-            echo "::notice::ccache HIT — incremental compile should be faster"
+            echo "::notice::ccache HIT"
           else
             echo "::notice::ccache MISS — cold compile"
           fi
+          ccache --zero-stats || true
           ccache -s || true
 
       - name: Telegram Desktop build
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "4"
         run: |
+          set -euo pipefail
           cd tdesktop/Telegram
           echo "ARTIFACT_NAME=CustomTelegram" >> "$GITHUB_ENV"
           ls -l ../../Libraries/local/Qt-*/lib/*.a | head
           CLANG="$(xcrun --find clang)"
           CLANGXX="$(xcrun --find clang++)"
+          WRAP="${RUNNER_TEMP}/ccache-wrappers"
+          mkdir -p "$WRAP"
+          # Xcode treats CC as one executable path. "ccache /path/clang" is not a path.
+          printf '#!/bin/sh\nexec ccache "%s" "$@"\n' "$CLANG" > "$WRAP/clang"
+          printf '#!/bin/sh\nexec ccache "%s" "$@"\n' "$CLANGXX" > "$WRAP/clang++"
+          chmod +x "$WRAP/clang" "$WRAP/clang++"
           ./configure.sh \
             -D CMAKE_CONFIGURATION_TYPES=Debug \
             -D CMAKE_OSX_ARCHITECTURES=x86_64 \
             -D DESKTOP_APP_MAC_ARCH=x86_64 \
             -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
-            -D CMAKE_XCODE_ATTRIBUTE_CC="ccache ${CLANG}" \
-            -D CMAKE_XCODE_ATTRIBUTE_CXX="ccache ${CLANGXX}" \
-            -D CMAKE_XCODE_ATTRIBUTE_LD="ccache ${CLANG}" \
-            -D CMAKE_XCODE_ATTRIBUTE_LDPLUSPLUS="ccache ${CLANGXX}" \
+            -D CMAKE_XCODE_ATTRIBUTE_CC="$WRAP/clang" \
+            -D CMAKE_XCODE_ATTRIBUTE_CXX="$WRAP/clang++" \
             -D TDESKTOP_API_ID=2040 \
             -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 \
             -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
@@ -151,11 +171,12 @@ jobs:
           ccache -s
 
       - name: Save compile cache
-        if: always() && steps.cache-ccache.outputs.cache-hit != 'true'
+        if: success() && steps.cache-ccache.outputs.cache-hit != 'true'
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ${{ steps.cache-ccache.outputs.cache-primary-key }}
+          key: ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
 
       - name: Move artifact
         run: |
