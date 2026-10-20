@@ -51,6 +51,30 @@ jobs:
           test -f Telegram/SourceFiles/custom/custom_search_panel.cpp
           echo "patch applied"
 
+      - name: Patch libjxl for Apple clang
+        run: |
+          set -euo pipefail
+          python3 - << 'PY'
+          from pathlib import Path
+          p = Path("tdesktop/Telegram/build/prepare/prepare.py")
+          text = p.read_text()
+          old = r'''mac:
+              cmake . \\
+                  -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+                  -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX \\
+                  ${cmake_defines}'''
+          new = r'''mac:
+              python3 -c "from pathlib import Path; p=Path('third_party/skcms.cmake'); t=p.read_text(); old=';-march=x86-64;'; assert old in t, 'libjxl skcms march flag missing'; p.write_text(t.replace(old, ';'))"
+              cmake . \\
+                  -D CMAKE_OSX_ARCHITECTURES="x86_64" \\
+                  -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX \\
+                  ${cmake_defines}'''
+          if text.count(old) != 1:
+              raise SystemExit(f"libjxl mac block count={text.count(old)}")
+          p.write_text(text.replace(old, new, 1))
+          print("libjxl patched: x86_64 only, drop -march=x86-64")
+          PY
+
       - name: Homebrew cache
         id: cache-brew
         uses: actions/cache/restore@v4
