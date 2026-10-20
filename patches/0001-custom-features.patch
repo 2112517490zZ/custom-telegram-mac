@@ -1,5 +1,5 @@
 diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
-index e3a23be..69a905f 100644
+index e3a23be..e4dfb1e 100644
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
 @@ -100,6 +100,10 @@ PRIVATE
@@ -13,7 +13,7 @@ index e3a23be..69a905f 100644
  if (NOT DESKTOP_APP_DISABLE_SWIFT6)
      telegram_add_apple_swift_runtime(Telegram)
  endif()
-@@ -1465,6 +1469,13 @@ PRIVATE
+@@ -1465,6 +1469,15 @@ PRIVATE
      main/main_app_config_values.h
      main/main_domain.cpp
      main/main_domain.h
@@ -21,6 +21,8 @@ index e3a23be..69a905f 100644
 +    custom/custom_import.h
 +    custom/custom_export.cpp
 +    custom/custom_export.h
++    custom/custom_account_rail.cpp
++    custom/custom_account_rail.h
 +    custom/custom_personal.h
 +    custom/custom_search_panel.cpp
 +    custom/custom_search_panel.h
@@ -110,6 +112,282 @@ index 9a194cc..7172a99 100644
  };
  
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
+diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
+new file mode 100644
+index 0000000..d4eb385
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
+@@ -0,0 +1,223 @@
++#include "custom/custom_account_rail.h"
++
++#include "core/application.h"
++#include "custom/custom_export.h"
++#include "custom/custom_import.h"
++#include "data/data_session.h"
++#include "data/data_user.h"
++#include "main/main_account.h"
++#include "main/main_domain.h"
++#include "main/main_session.h"
++#include "window/window_session_controller.h"
++
++#include <array>
++
++#include <QtGui/QDragEnterEvent>
++#include <QtGui/QDropEvent>
++#include <QtGui/QPainter>
++#include <QtWidgets/QLineEdit>
++#include <QtWidgets/QPushButton>
++#include <QtWidgets/QScrollArea>
++#include <QtWidgets/QVBoxLayout>
++
++namespace Custom {
++namespace {
++
++[[nodiscard]] QColor ColorFor(const QString &name) {
++	static const auto kColors = std::array{
++		QColor(0xe6, 0x7e, 0x22),
++		QColor(0x1a, 0xbc, 0x9c),
++		QColor(0x8e, 0x44, 0xad),
++		QColor(0x29, 0x80, 0xb9),
++		QColor(0x16, 0xa0, 0x85),
++		QColor(0xc0, 0x39, 0x2b),
++	};
++	auto hash = 0u;
++	for (const auto ch : name) {
++		hash = hash * 33 + uint(ch.unicode());
++	}
++	return kColors[hash % kColors.size()];
++}
++
++class RailButton final : public QPushButton {
++public:
++	RailButton(
++		QWidget *parent,
++		const QString &name,
++		int unread,
++		bool active)
++	: QPushButton(parent)
++	, _name(name)
++	, _unread(unread)
++	, _active(active) {
++		setCursor(Qt::PointingHandCursor);
++		setFixedHeight(64);
++		setToolTip(name);
++	}
++
++protected:
++	void paintEvent(QPaintEvent *) override {
++		auto p = QPainter(this);
++		if (_active || underMouse()) {
++			p.fillRect(rect(), QColor(53, 80, 106));
++		}
++		const auto size = 42;
++		const auto left = (width() - size) / 2;
++		const auto top = 6;
++		p.setRenderHint(QPainter::Antialiasing);
++		p.setPen(Qt::NoPen);
++		p.setBrush(ColorFor(_name));
++		p.drawEllipse(left, top, size, size);
++		p.setPen(Qt::white);
++		p.setFont(QFont(font().family(), 14, QFont::Bold));
++		p.drawText(
++			QRect(left, top, size, size),
++			Qt::AlignCenter,
++			_name.left(1).toUpper());
++		if (_unread > 0) {
++			p.setBrush(QColor(229, 57, 53));
++			p.drawEllipse(left + size - 14, top - 1, 16, 16);
++			p.setFont(QFont(font().family(), 8, QFont::Bold));
++			p.drawText(
++				QRect(left + size - 14, top - 1, 16, 16),
++				Qt::AlignCenter,
++				QString::number(std::min(_unread, 99)));
++		}
++		p.setPen(QColor(197, 211, 222));
++		p.setFont(QFont(font().family(), 8));
++		p.drawText(
++			QRect(2, 50, width() - 4, 12),
++			Qt::AlignHCenter | Qt::AlignVCenter,
++			_name);
++	}
++
++private:
++	QString _name;
++	int _unread = 0;
++	bool _active = false;
++};
++
++} // namespace
++
++int AccountRail::Width() {
++	return 86;
++}
++
++AccountRail::AccountRail(
++	QWidget *parent,
++	not_null<Window::SessionController*> controller)
++: Ui::RpWidget(parent)
++, _controller(controller)
++, _search(new QLineEdit(this))
++, _scroll(new QScrollArea(this))
++, _import(new QPushButton(QString::fromUtf8("导入"), this))
++, _export(new QPushButton(QString::fromUtf8("导出"), this)) {
++	setAcceptDrops(true);
++	_search->setPlaceholderText(QString::fromUtf8("名称/号码"));
++	_search->setStyleSheet(
++		"QLineEdit{background:#1f2e3d;color:#fff;border:0;"
++		"border-radius:8px;padding:6px;font-size:11px;}");
++	_scroll->setFrameShape(QFrame::NoFrame);
++	_scroll->setWidgetResizable(true);
++	_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++	_scroll->setStyleSheet(
++		"QScrollArea{background:#293a4c;border:0;}"
++		"QScrollBar:vertical{width:6px;background:transparent;}"
++		"QScrollBar::handle:vertical{background:#6f879b;border-radius:3px;}");
++	const auto style = QString(
++		"QPushButton{background:#1f2e3d;color:#d7e4ef;border:1px dashed #6f879b;"
++		"border-radius:8px;padding:8px 4px;font-size:11px;}"
++		"QPushButton:hover{background:#35506a;}");
++	_import->setStyleSheet(style);
++	_export->setStyleSheet(
++		"QPushButton{background:#4a2a12;color:#f3d2b5;border:1px solid #8a5a2b;"
++		"border-radius:8px;padding:8px 4px;font-size:11px;}"
++		"QPushButton:hover{background:#6a3a18;}");
++
++	connect(_search, &QLineEdit::textChanged, this, [=](const QString &text) {
++		_query = text.trimmed();
++		rebuild();
++	});
++	connect(_import, &QPushButton::clicked, this, [=] {
++		ChooseAndImportAccountPack(this, &controller->session().domain());
++	});
++	connect(_export, &QPushButton::clicked, this, [=] {
++		ChooseAndExportAccounts(controller);
++	});
++
++	Core::App().domain().accountsChanges(
++	) | rpl::start_with_next([=] {
++		rebuild();
++	}, lifetime());
++	rebuild();
++}
++
++void AccountRail::rebuild() {
++	auto *inner = new QWidget;
++	auto *layout = new QVBoxLayout(inner);
++	layout->setContentsMargins(4, 4, 4, 4);
++	layout->setSpacing(2);
++	const auto current = &_controller->session().account();
++	for (const auto account : Core::App().domain().orderedAccounts()) {
++		if (!account->sessionExists()) {
++			continue;
++		}
++		if (!AccountMatchesQuery(account, _query)) {
++			continue;
++		}
++		const auto user = account->session().user();
++		const auto unread = account->session().data().personalUnreadBadge();
++		const auto button = new RailButton(
++			inner,
++			user->name().isEmpty() ? user->phone() : user->name(),
++			unread,
++			account == current);
++		QObject::connect(button, &QPushButton::clicked, this, [=] {
++			Core::App().domain().maybeActivate(account);
++		});
++		button->setContextMenuPolicy(Qt::CustomContextMenu);
++		QObject::connect(
++			button,
++			&QWidget::customContextMenuRequested,
++			this,
++			[=] {
++				ChooseAndExportOne(this, account);
++			});
++		layout->addWidget(button);
++	}
++	layout->addStretch();
++	_scroll->setWidget(inner);
++	_inner = inner;
++}
++
++void AccountRail::resizeEvent(QResizeEvent *e) {
++	_search->setGeometry(6, 8, width() - 12, 28);
++	_export->setGeometry(6, height() - 40, width() - 12, 32);
++	_import->setGeometry(6, height() - 78, width() - 12, 32);
++	_scroll->setGeometry(0, 42, width(), height() - 126);
++	if (_inner) {
++		_inner->setFixedWidth(width());
++	}
++}
++
++void AccountRail::paintEvent(QPaintEvent *e) {
++	auto p = QPainter(this);
++	p.fillRect(rect(), QColor(41, 58, 76));
++}
++
++void AccountRail::dragEnterEvent(QDragEnterEvent *e) {
++	if (!ZipPathsFromMime(e->mimeData()).isEmpty()) {
++		e->setDropAction(Qt::CopyAction);
++		e->accept();
++	}
++}
++
++void AccountRail::dropEvent(QDropEvent *e) {
++	if (TryImportDroppedZip(
++			e->mimeData(),
++			&_controller->session().domain())) {
++		e->acceptProposedAction();
++	}
++}
++
++} // namespace Custom
+diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
+new file mode 100644
+index 0000000..c2aecc3
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_account_rail.h
+@@ -0,0 +1,41 @@
++#pragma once
++
++#include "ui/rp_widget.h"
++
++class QLineEdit;
++class QPushButton;
++class QScrollArea;
++class QWidget;
++
++namespace Window {
++class SessionController;
++} // namespace Window
++
++namespace Custom {
++
++class AccountRail final : public Ui::RpWidget {
++public:
++	AccountRail(
++		QWidget *parent,
++		not_null<Window::SessionController*> controller);
++
++	[[nodiscard]] static int Width();
++
++private:
++	void resizeEvent(QResizeEvent *e) override;
++	void paintEvent(QPaintEvent *e) override;
++	void dragEnterEvent(QDragEnterEvent *e) override;
++	void dropEvent(QDropEvent *e) override;
++
++	void rebuild();
++
++	const not_null<Window::SessionController*> _controller;
++	QLineEdit *_search = nullptr;
++	QScrollArea *_scroll = nullptr;
++	QWidget *_inner = nullptr;
++	QPushButton *_import = nullptr;
++	QPushButton *_export = nullptr;
++	QString _query;
++};
++
++} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
 index 0000000..92a660c
@@ -1665,19 +1943,20 @@ index eef6d0e..1f41217 100644
  	void activate(not_null<Main::Account*> account);
  	void addActivated(MTP::Environment environment, bool newWindow = false);
 diff --git a/Telegram/SourceFiles/mainwidget.cpp b/Telegram/SourceFiles/mainwidget.cpp
-index baf29c7..523ba47 100644
+index baf29c7..5e3f05d 100644
 --- a/Telegram/SourceFiles/mainwidget.cpp
 +++ b/Telegram/SourceFiles/mainwidget.cpp
-@@ -52,6 +52,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -52,6 +52,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "chat_helpers/message_field.h"
  #include "info/info_memento.h"
  #include "apiwrap.h"
++#include "custom/custom_account_rail.h"
 +#include "custom/custom_import.h"
 +#include "custom/custom_search_panel.h"
  #include "dialogs/dialogs_widget.h"
  #include "history/history_widget.h"
  #include "history/history_drag_area.h"
-@@ -102,6 +104,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -102,6 +105,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  
  #include <QtCore/QCoreApplication>
  #include <QtCore/QMimeData>
@@ -1686,7 +1965,17 @@ index baf29c7..523ba47 100644
  
  namespace {
  
-@@ -280,11 +284,15 @@ MainWidget::MainWidget(
+@@ -273,6 +278,9 @@ MainWidget::MainWidget(
+ , _controller(controller)
+ , _dialogsWidth(st::columnMinimalWidthLeft)
+ , _thirdColumnWidth(st::columnMinimalWidthThird)
++, _accountRail(windowId().hasChatsList()
++	? base::make_unique_q<Custom::AccountRail>(this, controller)
++	: nullptr)
+ , _dialogs(windowId().hasChatsList()
+ 	? base::make_unique_q<Dialogs::Widget>(
+ 		this,
+@@ -280,11 +288,15 @@ MainWidget::MainWidget(
  		Dialogs::Widget::Layout::Main)
  	: nullptr)
  , _history(std::in_place, this, _controller)
@@ -1702,47 +1991,59 @@ index baf29c7..523ba47 100644
  	if (_dialogs) {
  		setupConnectingWidget();
  	}
-@@ -2409,6 +2417,9 @@ void MainWidget::orderWidgets() {
+@@ -2409,6 +2421,12 @@ void MainWidget::orderWidgets() {
  	if (_dialogs) {
  		_dialogs->raiseWithTooltip();
  	}
++	if (_accountRail) {
++		_accountRail->raise();
++	}
 +	if (_searchPanel) {
 +		_searchPanel->raise();
 +	}
  	if (_player) {
  		_player->raise();
  	}
-@@ -2562,6 +2573,9 @@ void MainWidget::hideAll() {
+@@ -2562,6 +2580,12 @@ void MainWidget::hideAll() {
  	if (_dialogs) {
  		_dialogs->hide();
  	}
++	if (_accountRail) {
++		_accountRail->hide();
++	}
 +	if (_searchPanel) {
 +		_searchPanel->hide();
 +	}
  	_history->hide();
  	if (_mainSection) {
  		_mainSection->hide();
-@@ -2592,6 +2606,9 @@ void MainWidget::showAll() {
+@@ -2592,6 +2616,12 @@ void MainWidget::showAll() {
  			tr::lng_cloud_password_updated()));
  	}
  	if (isOneColumn()) {
++		if (_accountRail) {
++			_accountRail->hide();
++		}
 +		if (_searchPanel) {
 +			_searchPanel->hide();
 +		}
  		if (_sideShadow) {
  			_sideShadow->hide();
  		}
-@@ -2621,6 +2638,9 @@ void MainWidget::showAll() {
+@@ -2621,6 +2651,12 @@ void MainWidget::showAll() {
  		if (_dialogs) {
  			_dialogs->showFast();
  		}
++		if (_accountRail) {
++			_accountRail->show();
++		}
 +		if (_searchPanel) {
 +			_searchPanel->show();
 +		}
  		if (_mainSection) {
  			_mainSection->show();
  		} else {
-@@ -2657,6 +2677,21 @@ void MainWidget::resizeEvent(QResizeEvent *e) {
+@@ -2657,6 +2693,21 @@ void MainWidget::resizeEvent(QResizeEvent *e) {
  	updateControlsGeometry();
  }
  
@@ -1764,14 +2065,22 @@ index baf29c7..523ba47 100644
  void MainWidget::updateMainSectionShown() {
  	_controller->setMainSectionShown(_mainSection || _history->peer());
  }
-@@ -2745,12 +2780,24 @@ void MainWidget::updateControlsGeometry() {
+@@ -2745,12 +2796,32 @@ void MainWidget::updateControlsGeometry() {
  			mainSectionGeometry,
  			_contentScrollAddToY);
  		if (_hider) _hider->setGeometry(0, 0, dialogsWidth, height());
++		if (_accountRail) {
++			_accountRail->hide();
++		}
 +		if (_searchPanel) {
 +			_searchPanel->hide();
 +		}
  	} else {
++		const auto railWidth = _accountRail ? Custom::AccountRail::Width() : 0;
++		if (_accountRail) {
++			_accountRail->setGeometry(0, 0, railWidth, height());
++			_accountRail->show();
++		}
 +		const auto searchWidth = _searchPanel ? 300 : 0;
 +		if (_searchPanel) {
 +			_searchPanel->setGeometry(
@@ -1790,16 +2099,22 @@ index baf29c7..523ba47 100644
  				thirdSectionTop,
  				thirdSectionWidth,
  				height() - thirdSectionTop);
-@@ -2760,7 +2807,7 @@ void MainWidget::updateControlsGeometry() {
+@@ -2760,49 +2831,51 @@ void MainWidget::updateControlsGeometry() {
  		if (_dialogs) {
  			accumulate_min(
  				dialogsWidth,
 -				width() - st::columnMinimalWidthMain);
-+				width() - st::columnMinimalWidthMain - searchWidth);
- 			_dialogs->setGeometryToLeft(0, 0, dialogsWidth, height());
+-			_dialogs->setGeometryToLeft(0, 0, dialogsWidth, height());
++				width() - st::columnMinimalWidthMain - searchWidth - railWidth);
++			_dialogs->setGeometryToLeft(railWidth, 0, dialogsWidth, height());
  		}
  		if (_sideShadow) {
-@@ -2772,14 +2819,15 @@ void MainWidget::updateControlsGeometry() {
+ 			_sideShadow->setGeometryToLeft(
+-				dialogsWidth,
++				railWidth + dialogsWidth,
+ 				shadowTop,
+ 				st::lineWidth,
+ 				shadowHeight);
  		}
  		if (_thirdShadow) {
  			_thirdShadow->setGeometryToLeft(
@@ -1810,29 +2125,59 @@ index baf29c7..523ba47 100644
  				shadowHeight);
  		}
  		const auto mainSectionWidth = width()
++			- railWidth
  			- dialogsWidth
 -			- thirdSectionWidth;
 +			- thirdSectionWidth
 +			- searchWidth;
  		if (_callTopBar) {
  			_callTopBar->resizeToWidth(mainSectionWidth);
- 			_callTopBar->moveToLeft(dialogsWidth, 0);
+-			_callTopBar->moveToLeft(dialogsWidth, 0);
++			_callTopBar->moveToLeft(railWidth + dialogsWidth, 0);
+ 		}
+ 		if (_exportTopBar) {
+ 			_exportTopBar->resizeToWidth(mainSectionWidth);
+-			_exportTopBar->moveToLeft(dialogsWidth, _callTopBarHeight);
++			_exportTopBar->moveToLeft(railWidth + dialogsWidth, _callTopBarHeight);
+ 		}
+ 		if (_player) {
+ 			_player->resizeToWidth(mainSectionWidth);
+ 			_player->moveToLeft(
+-				dialogsWidth,
++				railWidth + dialogsWidth,
+ 				_callTopBarHeight + _exportTopBarHeight);
+ 		}
+ 		_history->setGeometryWithTopMoved(QRect(
+-			dialogsWidth,
++			railWidth + dialogsWidth,
+ 			mainSectionTop,
+ 			mainSectionWidth,
+ 			height() - mainSectionTop
+ 		), _contentScrollAddToY);
+ 		if (_hider) {
+ 			_hider->setGeometryToLeft(
+-				dialogsWidth,
++				railWidth + dialogsWidth,
+ 				0,
+ 				mainSectionWidth,
+ 				height());
 diff --git a/Telegram/SourceFiles/mainwidget.h b/Telegram/SourceFiles/mainwidget.h
-index 82a35ec..5e8f2b7 100644
+index 82a35ec..7145568 100644
 --- a/Telegram/SourceFiles/mainwidget.h
 +++ b/Telegram/SourceFiles/mainwidget.h
-@@ -72,6 +72,10 @@ template <typename Widget>
+@@ -72,6 +72,11 @@ template <typename Widget>
  class SlideWrap;
  } // namespace Ui
  
 +namespace Custom {
++class AccountRail;
 +class SearchPanel;
 +} // namespace Custom
 +
  namespace Window {
  class SessionController;
  template <typename Inner>
-@@ -233,6 +237,8 @@ public:
+@@ -233,6 +238,8 @@ public:
  private:
  	void paintEvent(QPaintEvent *e) override;
  	void resizeEvent(QResizeEvent *e) override;
@@ -1841,8 +2186,11 @@ index 82a35ec..5e8f2b7 100644
  	bool eventFilter(QObject *o, QEvent *e) override;
  
  	[[nodiscard]] bool relevantForDialogsFocus(
-@@ -349,6 +355,7 @@ private:
+@@ -347,8 +354,10 @@ private:
+ 	int _thirdColumnWidth = 0;
+ 	Ui::Animations::Simple _a_dialogsWidth;
  
++	const base::unique_qptr<Custom::AccountRail> _accountRail;
  	const base::unique_qptr<Dialogs::Widget> _dialogs;
  	const base::unique_qptr<HistoryWidget> _history;
 +	const base::unique_qptr<Custom::SearchPanel> _searchPanel;
@@ -1850,7 +2198,7 @@ index 82a35ec..5e8f2b7 100644
  	object_ptr<Window::SectionWidget> _thirdSection = { nullptr };
  	std::shared_ptr<Window::SectionMemento> _thirdSectionFromStack;
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
-index a1e5ece..f892fcf 100644
+index a1e5ece..11b6e9d 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
 +++ b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 @@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -1870,15 +2218,26 @@ index a1e5ece..f892fcf 100644
  #include "mtproto/mtproto_dc_options.h"
  #include "window/window_session_controller.h"
  #include "window/window_controller.h"
-@@ -227,6 +230,7 @@ private:
+@@ -75,6 +78,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ 
+ #include <QtGui/QGuiApplication>
+ #include <QtCore/QBuffer>
++#include <QtWidgets/QScrollArea>
+ 
+ namespace Settings {
+ namespace {
+@@ -227,8 +231,10 @@ private:
  	const not_null<Window::SessionController*> _controller;
  	const not_null<Ui::VerticalLayout*> _outer;
  	int _outerIndex = 0;
 +	QString _query;
  
  	Ui::SlideWrap<Ui::SettingsButton> *_addAccount = nullptr;
++	QScrollArea *_accountScroll = nullptr;
  	base::flat_map<
-@@ -867,8 +871,23 @@ void SetupAccountsWrap(
+ 		not_null<::Main::Account*>,
+ 		base::unique_qptr<Ui::SettingsButton>> _watched;
+@@ -867,8 +873,23 @@ void SetupAccountsWrap(
  
  		Ui::RpWidget userpic;
  		Ui::PeerUserpicView view;
@@ -1902,7 +2261,7 @@ index a1e5ece..f892fcf 100644
  
  	const auto userpicSkip = 2 * st::mainMenuAccountLine + st::lineWidth;
  	const auto userpicSize = st::mainMenuAccountSize
-@@ -888,7 +907,22 @@ void SetupAccountsWrap(
+@@ -888,7 +909,22 @@ void SetupAccountsWrap(
  		const auto line = st::mainMenuAccountLine;
  		const auto skip = 2 * line + st::lineWidth;
  		const auto full = size + skip * 2;
@@ -1925,7 +2284,7 @@ index a1e5ece..f892fcf 100644
  		if (active) {
  			const auto shift = st::lineWidth + (line * 0.5);
  			const auto diameter = full - 2 * shift;
-@@ -928,6 +962,9 @@ void SetupAccountsWrap(
+@@ -928,6 +964,9 @@ void SetupAccountsWrap(
  			Info::Profile::CopyPhoneToClipboard(
  				Info::Profile::PhoneValue(session->user()));
  		}, &st::menuIconCopy);
@@ -1935,7 +2294,7 @@ index a1e5ece..f892fcf 100644
  
  		if (!locked) {
  			if (!isActive) {
-@@ -986,6 +1023,21 @@ Ui::RpWidget *AccountsList::addAccountButton() const {
+@@ -986,6 +1025,31 @@ Ui::RpWidget *AccountsList::addAccountButton() const {
  }
  
  void AccountsList::setup() {
@@ -1952,12 +2311,22 @@ index a1e5ece..f892fcf 100644
 +		}
 +		rebuild();
 +	}, search->lifetime());
++	const auto scrollWrap = _outer->add(
++		object_ptr<Ui::FixedHeightWidget>(_outer.get(), 360));
++	_accountScroll = Ui::CreateChild<QScrollArea>(scrollWrap);
++	_accountScroll->setWidgetResizable(true);
++	_accountScroll->setFrameShape(QFrame::NoFrame);
++	_accountScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++	scrollWrap->sizeValue(
++	) | rpl::on_next([=](QSize size) {
++		_accountScroll->setGeometry(0, 0, size.width(), size.height());
++	}, scrollWrap->lifetime());
 +	_outerIndex = _outer->count();
 +
  	_addAccount = setupAdd();
  
  	rpl::single(rpl::empty) | rpl::then(
-@@ -1056,7 +1108,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1056,7 +1120,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  				found = true;
  			}
  		}
@@ -1966,7 +2335,7 @@ index a1e5ece..f892fcf 100644
  			_controller->show(
  				Box(AccountsLimitBox, &_controller->session()));
  		} else if (newWindow) {
-@@ -1069,6 +1121,27 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1069,6 +1133,27 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  		}
  	};
  
@@ -1994,7 +2363,19 @@ index a1e5ece..f892fcf 100644
  	button->setAcceptBoth(true);
  	button->clicks(
  	) | rpl::on_next([=](Qt::MouseButton which) {
-@@ -1140,6 +1213,12 @@ void AccountsList::rebuild() {
+@@ -1103,9 +1188,8 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+ }
+ 
+ void AccountsList::rebuild() {
+-	const auto inner = _outer->insert(
+-		_outerIndex,
+-		object_ptr<Ui::VerticalLayout>(_outer.get()));
++	const auto inner = Ui::CreateChild<Ui::VerticalLayout>(_accountScroll);
++	_accountScroll->setWidget(inner);
+ 
+ 	_reorder = std::make_unique<Ui::VerticalLayoutReorder>(inner);
+ 	_reorder->updates(
+@@ -1140,6 +1224,12 @@ void AccountsList::rebuild() {
  		Assert(i != _watched.end());
  
  		auto &button = i->second;
