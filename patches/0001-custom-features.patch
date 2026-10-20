@@ -1,5 +1,5 @@
 diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
-index e3a23be..54cb2ae 100644
+index e3a23be..69a905f 100644
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
 @@ -100,6 +100,10 @@ PRIVATE
@@ -13,12 +13,14 @@ index e3a23be..54cb2ae 100644
  if (NOT DESKTOP_APP_DISABLE_SWIFT6)
      telegram_add_apple_swift_runtime(Telegram)
  endif()
-@@ -1465,6 +1469,11 @@ PRIVATE
+@@ -1465,6 +1469,13 @@ PRIVATE
      main/main_app_config_values.h
      main/main_domain.cpp
      main/main_domain.h
 +    custom/custom_import.cpp
 +    custom/custom_import.h
++    custom/custom_export.cpp
++    custom/custom_export.h
 +    custom/custom_personal.h
 +    custom/custom_search_panel.cpp
 +    custom/custom_search_panel.h
@@ -108,17 +110,536 @@ index 9a194cc..7172a99 100644
  };
  
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
+diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
+new file mode 100644
+index 0000000..92a660c
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_export.cpp
+@@ -0,0 +1,474 @@
++#include "custom/custom_export.h"
++
++#include "custom/custom_import.h"
++#include "core/application.h"
++#include "core/file_utilities.h"
++#include "core/utils.h"
++#include "data/data_user.h"
++#include "main/main_account.h"
++#include "main/main_domain.h"
++#include "main/main_session.h"
++#include "mtproto/mtp_instance.h"
++#include "mtproto/mtproto_auth_key.h"
++#include "storage/details/storage_file_utilities.h"
++#include "storage/localstorage.h"
++#include "styles/style_boxes.h"
++#include "styles/style_layers.h"
++#include "ui/boxes/confirm_box.h"
++#include "ui/layers/generic_box.h"
++#include "ui/toast/toast.h"
++#include "ui/widgets/checkbox.h"
++#include "ui/widgets/fields/input_field.h"
++#include "ui/widgets/labels.h"
++#include "window/window_session_controller.h"
++
++#include <cstring>
++
++#include <QtCore/QDateTime>
++#include <QtCore/QDir>
++#include <QtCore/QDirIterator>
++#include <QtCore/QFile>
++#include <QtCore/QFileInfo>
++#include <QtCore/QJsonDocument>
++#include <QtCore/QJsonObject>
++#include <QtCore/QProcess>
++#include <QtCore/QRegularExpression>
++#include <QtCore/QTemporaryDir>
++#include <sqlite3.h>
++
++namespace Custom {
++namespace {
++
++constexpr auto kTemplateHash = "D877F783D5D3EF8C";
++
++[[nodiscard]] QString ComposeDataString(int index) {
++	auto result = u"data"_q;
++	if (index > 0) {
++		result += '#' + QString::number(index + 1);
++	}
++	return result;
++}
++
++[[nodiscard]] QString AccountFileHash(int index) {
++	FileKey hash[2] = { 0 };
++	const auto utf8 = ComposeDataString(index).toUtf8();
++	hashMd5(utf8.constData(), utf8.size(), hash);
++	return Storage::details::ToFilePart(hash[0]);
++}
++
++[[nodiscard]] QString DigitsOnly(QString value) {
++	value.remove(QRegularExpression("[^0-9]"));
++	return value;
++}
++
++void CopyDir(const QString &src, const QString &dst) {
++	QDir().mkpath(dst);
++	const auto list = QDir(src).entryInfoList(
++		QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
++	for (const auto &info : list) {
++		const auto target = dst + '/' + info.fileName();
++		if (info.isDir()) {
++			CopyDir(info.filePath(), target);
++		} else {
++			QFile::remove(target);
++			QFile::copy(info.filePath(), target);
++		}
++	}
++}
++
++bool CopyExisting(const QString &src, const QString &dst) {
++	if (!QFile::exists(src)) {
++		return false;
++	}
++	QDir().mkpath(QFileInfo(dst).absolutePath());
++	QFile::remove(dst);
++	return QFile::copy(src, dst);
++}
++
++bool WriteTelethonSession(
++		const QString &path,
++		qint32 dcId,
++		const QByteArray &authKey) {
++	if (dcId <= 0 || authKey.size() != 256) {
++		return false;
++	}
++	QFile::remove(path);
++	sqlite3 *db = nullptr;
++	const auto utf8 = QDir::toNativeSeparators(path).toUtf8();
++	if (sqlite3_open(utf8.constData(), &db) != SQLITE_OK) {
++		if (db) {
++			sqlite3_close(db);
++		}
++		return false;
++	}
++	sqlite3_exec(
++		db,
++		"CREATE TABLE sessions ("
++		"dc_id INTEGER PRIMARY KEY,"
++		"server_address TEXT,"
++		"port INTEGER,"
++		"auth_key BLOB)",
++		nullptr,
++		nullptr,
++		nullptr);
++	static const auto kHost = std::array<const char*, 6>{
++		"",
++		"149.154.175.53",
++		"149.154.167.51",
++		"149.154.175.100",
++		"149.154.167.91",
++		"91.108.56.165",
++	};
++	const auto host = (dcId >= 1 && dcId <= 5) ? kHost[dcId] : kHost[2];
++	sqlite3_stmt *stmt = nullptr;
++	const auto sql = "INSERT INTO sessions VALUES (?1, ?2, 443, ?3)";
++	auto ok = false;
++	if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
++		sqlite3_bind_int(stmt, 1, dcId);
++		sqlite3_bind_text(stmt, 2, host, -1, SQLITE_TRANSIENT);
++		sqlite3_bind_blob(
++			stmt,
++			3,
++			authKey.constData(),
++			authKey.size(),
++			SQLITE_TRANSIENT);
++		ok = (sqlite3_step(stmt) == SQLITE_DONE);
++		sqlite3_finalize(stmt);
++	}
++	sqlite3_close(db);
++	return ok;
++}
++
++bool ZipFolder(const QString &folder, const QString &zipPath) {
++	QFile::remove(zipPath);
++	QProcess proc;
++	proc.setProgram("zip");
++	proc.setWorkingDirectory(QFileInfo(folder).absolutePath());
++	proc.setArguments({
++		"-qr",
++		zipPath,
++		QFileInfo(folder).fileName(),
++	});
++	proc.start();
++	if (!proc.waitForFinished(10 * 60 * 1000)) {
++		proc.kill();
++		return false;
++	}
++	return proc.exitCode() == 0 && QFile::exists(zipPath);
++}
++
++struct PreparedAccount {
++	not_null<Main::Account*> account;
++	int index = 0;
++	QString phone;
++	QString folderName;
++	QJsonObject json;
++	QString twoFa;
++	qint32 dcId = 2;
++	QByteArray authKey;
++};
++
++[[nodiscard]] QJsonObject LoadIndex() {
++	QFile f(cWorkingDir() + u"tdata/account-index.json"_q);
++	if (!f.open(QIODevice::ReadOnly)) {
++		return {};
++	}
++	return QJsonDocument::fromJson(f.readAll()).object();
++}
++
++PreparedAccount PrepareOne(
++		not_null<Main::Account*> account,
++		int index,
++		const QJsonObject &indexRoot) {
++	PreparedAccount out{ .account = account, .index = index };
++	if (!account->sessionExists()) {
++		return out;
++	}
++	const auto user = account->session().user();
++	out.phone = user->phone();
++	const auto userId = QString::number(user->id().bare);
++	const auto stored = indexRoot.value(userId).toObject();
++	if (out.phone.isEmpty()) {
++		out.phone = stored.value("phone").toString();
++	}
++	out.twoFa = stored.value("twofa").toString();
++	if (out.twoFa.isEmpty()) {
++		out.twoFa = stored.value("twoFA").toString();
++	}
++	out.folderName = DigitsOnly(out.phone);
++	if (out.folderName.isEmpty()) {
++		out.folderName = userId;
++	}
++	out.json.insert("session_file", out.folderName);
++	out.json.insert("phone", out.phone.isEmpty() ? out.folderName : out.phone);
++	out.json.insert("app_id", 2040);
++	out.json.insert("app_hash", QString("b18441a1ff607e10a989891a5462e627"));
++	out.json.insert("user_id", QString::number(user->id().bare));
++	out.json.insert("username", user->username());
++	out.json.insert("first_name", user->firstName);
++	out.json.insert("last_name", user->lastName);
++	out.json.insert("twoFA", out.twoFa);
++	out.json.insert("password", out.twoFa);
++
++	const auto keys = account->mtp().getKeysForWrite();
++	for (const auto &key : keys) {
++		if (!key || key->data().size() != MTP::AuthKey::kSize) {
++			continue;
++		}
++		out.dcId = key->dcId() > 0 ? key->dcId() : 2;
++		out.authKey = QByteArray(
++			reinterpret_cast<const char*>(key->data().data()),
++			int(key->data().size()));
++		break;
++	}
++	out.json.insert("dc_id", out.dcId);
++	return out;
++}
++
++bool WriteOneFolder(const PreparedAccount &one, const QString &root) {
++	const auto folder = root + '/' + one.folderName;
++	const auto tdata = folder + "/tdata";
++	QDir().mkpath(tdata + '/' + kTemplateHash);
++
++	{
++		QFile json(folder + '/' + one.folderName + ".json");
++		if (!json.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++			return false;
++		}
++		json.write(QJsonDocument(one.json).toJson(QJsonDocument::Indented));
++	}
++	if (!one.twoFa.isEmpty()) {
++		QFile twoFa(folder + "/2FA.txt");
++		if (twoFa.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++			twoFa.write(one.twoFa.toUtf8());
++		}
++	}
++	if (one.authKey.size() == 256) {
++		WriteTelethonSession(
++			folder + '/' + one.folderName + ".session",
++			one.dcId,
++			one.authKey);
++	}
++
++	const auto srcBase = cWorkingDir() + u"tdata/"_q;
++	CopyExisting(srcBase + "key_datas", tdata + "/key_datas");
++	if (!QFile::exists(tdata + "/key_datas")) {
++		CopyExisting(srcBase + "key_data", tdata + "/key_datas");
++	}
++
++	const auto srcHash = AccountFileHash(one.index);
++	CopyDir(srcBase + srcHash, tdata + '/' + kTemplateHash);
++	if (!CopyExisting(srcBase + srcHash + 's', tdata + '/' + kTemplateHash + 's')) {
++		if (!CopyExisting(srcBase + srcHash + '0', tdata + '/' + kTemplateHash + 's')) {
++			CopyExisting(srcBase + srcHash + '1', tdata + '/' + kTemplateHash + 's');
++		}
++	}
++	return QDir(folder).exists();
++}
++
++void RemoveIndexKeys(const QStringList &userIds) {
++	const auto path = cWorkingDir() + u"tdata/account-index.json"_q;
++	QFile f(path);
++	if (!f.open(QIODevice::ReadOnly)) {
++		return;
++	}
++	auto root = QJsonDocument::fromJson(f.readAll()).object();
++	f.close();
++	for (const auto &id : userIds) {
++		root.remove(id);
++	}
++	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++		f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
++	}
++}
++
++void ShowExportResult(int n, const QString &error) {
++	Ui::Toast::Show(n > 0
++		? QString::fromUtf8("已导出 %1 个帐号，并已从客户端删除").arg(n)
++		: QString::fromUtf8("导出失败: %1").arg(
++			error.isEmpty() ? QString("empty") : error));
++}
++
++void StartExport(
++		const std::vector<not_null<Main::Account*>> &accounts,
++		QWidget *parent) {
++	if (accounts.empty()) {
++		Ui::Toast::Show(QString::fromUtf8("没有选中帐号"));
++		return;
++	}
++	const auto stamp = QDateTime::currentDateTime().toString(
++		"yyyyMMdd-HHmmss");
++	const auto suggested = QDir::homePath()
++		+ u"/导出帐号-"_q
++		+ stamp
++		+ u".zip"_q;
++	FileDialog::GetWritePath(
++		parent ? parent : Core::App().getFileDialogParent(),
++		QString::fromUtf8("导出帐号包"),
++		"Zip (*.zip);;All files (*.*)",
++		suggested,
++		[=](QString &&path) {
++			if (path.isEmpty()) {
++				return;
++			}
++			if (!path.endsWith(".zip", Qt::CaseInsensitive)) {
++				path += ".zip";
++			}
++			QString error;
++			const auto n = ExportAndDeleteAccounts(accounts, path, &error);
++			ShowExportResult(n, error);
++		});
++}
++
++} // namespace
++
++int ExportAndDeleteAccounts(
++		const std::vector<not_null<Main::Account*>> &accounts,
++		const QString &zipPath,
++		QString *error) {
++	if (accounts.empty()) {
++		if (error) *error = "empty";
++		return 0;
++	}
++	QTemporaryDir temp;
++	if (!temp.isValid()) {
++		if (error) *error = "temp dir";
++		return 0;
++	}
++	const auto batch = QFileInfo(zipPath).completeBaseName();
++	const auto root = temp.path() + '/' + batch;
++	QDir().mkpath(root);
++
++	const auto indexRoot = LoadIndex();
++	std::vector<PreparedAccount> prepared;
++	QStringList removeIds;
++	for (const auto account : accounts) {
++		if (!account->sessionExists()) {
++			continue;
++		}
++		auto found = -1;
++		for (const auto &[index, existing] : account->domain().accounts()) {
++			if (existing.get() == account.get()) {
++				found = index;
++				break;
++			}
++		}
++		if (found < 0) {
++			continue;
++		}
++		auto one = PrepareOne(account, found, indexRoot);
++		if (!WriteOneFolder(one, root)) {
++			continue;
++		}
++		removeIds.push_back(QString::number(
++			account->session().user()->id().bare));
++		prepared.push_back(std::move(one));
++	}
++	if (prepared.empty()) {
++		if (error) *error = QString::fromUtf8("没有可导出的已登录帐号");
++		return 0;
++	}
++	if (!ZipFolder(root, zipPath)) {
++		if (error) *error = "zip failed";
++		return 0;
++	}
++
++	std::vector<not_null<Main::Account*>> deleting;
++	Main::Account *active = nullptr;
++	const auto current = Core::App().domain().started()
++		? &Core::App().domain().active()
++		: nullptr;
++	for (const auto &one : prepared) {
++		if (current && one.account == current) {
++			active = one.account;
++		} else {
++			deleting.push_back(one.account);
++		}
++	}
++	RemoveIndexKeys(removeIds);
++	for (const auto account : deleting) {
++		Core::App().logoutWithChecks(account);
++	}
++	if (active) {
++		Core::App().logoutWithChecks(active);
++	}
++	return int(prepared.size());
++}
++
++void ChooseAndExportOne(
++		QWidget *parent,
++		not_null<Main::Account*> account) {
++	if (!account->sessionExists()) {
++		Ui::Toast::Show(QString::fromUtf8("这个号还没登录"));
++		return;
++	}
++	StartExport({ account }, parent);
++}
++
++void ChooseAndExportAccounts(
++		not_null<Window::SessionController*> controller) {
++	auto all = std::vector<not_null<Main::Account*>>();
++	for (const auto &account : controller->session().domain().orderedAccounts()) {
++		if (account->sessionExists()) {
++			all.push_back(account);
++		}
++	}
++	if (all.empty()) {
++		Ui::Toast::Show(QString::fromUtf8("没有已登录帐号可导出"));
++		return;
++	}
++
++	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
++		box->setTitle(rpl::single(QString::fromUtf8("批量导出帐号")));
++		box->addRow(object_ptr<Ui::FlatLabel>(
++			box,
++			rpl::single(QString::fromUtf8(
++				"按模版导出 zip。导出成功后这些号会从客户端删除。")),
++			st::boxLabel));
++		const auto search = box->addRow(object_ptr<Ui::InputField>(
++			box,
++			st::defaultInputField,
++			rpl::single(QString::fromUtf8("搜索帐号名称 / 手机号"))));
++		const auto checks = std::make_shared<
++			std::vector<std::pair<not_null<Main::Account*>, Ui::Checkbox*>>>();
++		for (const auto account : all) {
++			const auto user = account->session().user();
++			const auto label = user->name()
++				+ ' '
++				+ (user->phone().isEmpty()
++					? QString()
++					: ('+' + user->phone()));
++			const auto check = box->addRow(object_ptr<Ui::Checkbox>(
++				box,
++				label,
++				true,
++				st::defaultBoxCheckbox));
++			checks->push_back({ account, check });
++		}
++		search->changes(
++		) | rpl::on_next([=] {
++			const auto q = search->getLastText();
++			for (const auto &[account, check] : *checks) {
++				check->setVisible(AccountMatchesQuery(account, q));
++			}
++		}, search->lifetime());
++
++		box->addButton(rpl::single(QString::fromUtf8("导出并删除")), [=] {
++			std::vector<not_null<Main::Account*>> picked;
++			for (const auto &[account, check] : *checks) {
++				if (check->checked() && !check->isHidden()) {
++					picked.push_back(account);
++				}
++			}
++			if (picked.empty()) {
++				Ui::Toast::Show(QString::fromUtf8("没有选中帐号"));
++				return;
++			}
++			box->closeBox();
++			StartExport(picked, controller->widget());
++		});
++		box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
++	}));
++}
++
++} // namespace Custom
+diff --git a/Telegram/SourceFiles/custom/custom_export.h b/Telegram/SourceFiles/custom/custom_export.h
+new file mode 100644
+index 0000000..66302ef
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_export.h
+@@ -0,0 +1,30 @@
++#pragma once
++
++#include "base/basic_types.h"
++
++class QWidget;
++
++namespace Main {
++class Account;
++class Domain;
++} // namespace Main
++
++namespace Window {
++class SessionController;
++} // namespace Window
++
++namespace Custom {
++
++void ChooseAndExportAccounts(
++	not_null<Window::SessionController*> controller);
++
++void ChooseAndExportOne(
++	QWidget *parent,
++	not_null<Main::Account*> account);
++
++int ExportAndDeleteAccounts(
++	const std::vector<not_null<Main::Account*>> &accounts,
++	const QString &zipPath,
++	QString *error);
++
++} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..022ca76
+index 0000000..60a1c7d
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,416 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
 +#include "core/file_utilities.h"
++#include "data/data_user.h"
++#include "main/main_account.h"
 +#include "main/main_domain.h"
++#include "main/main_session.h"
 +#include "storage/localstorage.h"
 +#include "ui/toast/toast.h"
 +
@@ -130,8 +651,11 @@ index 0000000..022ca76
 +#include <QtCore/QFileInfo>
 +#include <QtCore/QJsonDocument>
 +#include <QtCore/QJsonObject>
++#include <QtCore/QMimeData>
 +#include <QtCore/QProcess>
++#include <QtCore/QRegularExpression>
 +#include <QtCore/QTemporaryDir>
++#include <QtCore/QUrl>
 +#include <sqlite3.h>
 +
 +namespace Custom {
@@ -349,6 +873,8 @@ index 0000000..022ca76
 +	}
 +}
 +
++} // namespace
++
 +void ShowImportResult(int n, const QString &error) {
 +	const auto text = n > 0
 +		? QString::fromUtf8("已导入 %1 个帐号").arg(n)
@@ -356,8 +882,6 @@ index 0000000..022ca76
 +			error.isEmpty() ? QString("empty") : error);
 +	Ui::Toast::Show(text);
 +}
-+
-+} // namespace
 +
 +int ImportAccountPack(
 +		const QString &path,
@@ -426,6 +950,82 @@ index 0000000..022ca76
 +	return imported;
 +}
 +
++QJsonObject LoadAccountIndex() {
++	QFile f(cWorkingDir() + u"tdata/account-index.json"_q);
++	if (!f.open(QIODevice::ReadOnly)) {
++		return {};
++	}
++	return QJsonDocument::fromJson(f.readAll()).object();
++}
++
++bool AccountMatchesQuery(
++		not_null<Main::Account*> account,
++		const QString &query) {
++	const auto q = query.trimmed();
++	if (q.isEmpty()) {
++		return true;
++	}
++	if (!account->sessionExists()) {
++		return false;
++	}
++	const auto user = account->session().user();
++	const auto digits = [](QString value) {
++		value.remove(QRegularExpression("[^0-9]"));
++		return value;
++	};
++	const auto name = user->name();
++	const auto phone = user->phone();
++	const auto username = user->username();
++	const auto id = QString::number(user->id().bare);
++	if (name.contains(q, Qt::CaseInsensitive)
++		|| username.contains(q, Qt::CaseInsensitive)
++		|| phone.contains(q, Qt::CaseInsensitive)
++		|| id.contains(q)) {
++		return true;
++	}
++	const auto qd = digits(q);
++	if (!qd.isEmpty() && digits(phone).contains(qd)) {
++		return true;
++	}
++	const auto stored = LoadAccountIndex().value(id).toObject();
++	const auto storedPhone = stored.value("phone").toString();
++	const auto storedName = stored.value("first_name").toString()
++		+ stored.value("last_name").toString();
++	return storedName.contains(q, Qt::CaseInsensitive)
++		|| storedPhone.contains(q, Qt::CaseInsensitive)
++		|| (!qd.isEmpty() && digits(storedPhone).contains(qd));
++}
++
++QStringList ZipPathsFromMime(const QMimeData *data) {
++	QStringList out;
++	if (!data || !data->hasUrls()) {
++		return out;
++	}
++	for (const auto &url : data->urls()) {
++		const auto path = url.toLocalFile();
++		if (path.endsWith(".zip", Qt::CaseInsensitive)) {
++			out.push_back(path);
++		}
++	}
++	return out;
++}
++
++bool TryImportDroppedZip(
++		const QMimeData *data,
++		not_null<Main::Domain*> domain) {
++	const auto zips = ZipPathsFromMime(data);
++	if (zips.isEmpty()) {
++		return false;
++	}
++	auto imported = 0;
++	QString error;
++	for (const auto &path : zips) {
++		imported += ImportAccountPack(path, domain, &error);
++	}
++	ShowImportResult(imported, error);
++	return imported > 0 || !error.isEmpty();
++}
++
 +void ChooseAndImportAccountPack(
 +		QWidget *parent,
 +		not_null<Main::Domain*> domain) {
@@ -450,20 +1050,23 @@ index 0000000..022ca76
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.h b/Telegram/SourceFiles/custom/custom_import.h
 new file mode 100644
-index 0000000..ab8eab9
+index 0000000..bfe9a6c
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.h
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,48 @@
 +#pragma once
 +
 +#include "base/basic_types.h"
 +
 +#include <QtCore/QByteArray>
++#include <QtCore/QJsonObject>
 +#include <QtCore/QString>
 +
 +class QWidget;
++class QMimeData;
 +
 +namespace Main {
++class Account;
 +class Domain;
 +} // namespace Main
 +
@@ -488,6 +1091,15 @@ index 0000000..ab8eab9
 +	const QString &path,
 +	not_null<Main::Domain*> domain,
 +	QString *error);
++
++[[nodiscard]] QJsonObject LoadAccountIndex();
++[[nodiscard]] bool AccountMatchesQuery(
++	not_null<Main::Account*> account,
++	const QString &query);
++[[nodiscard]] QStringList ZipPathsFromMime(const QMimeData *data);
++bool TryImportDroppedZip(
++	const QMimeData *data,
++	not_null<Main::Domain*> domain);
 +
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_personal.h b/Telegram/SourceFiles/custom/custom_personal.h
@@ -516,13 +1128,14 @@ index 0000000..41f03a2
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_search_panel.cpp b/Telegram/SourceFiles/custom/custom_search_panel.cpp
 new file mode 100644
-index 0000000..28f3899
+index 0000000..aa6eae2
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_search_panel.cpp
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,248 @@
 +#include "custom/custom_search_panel.h"
 +
 +#include "apiwrap.h"
++#include "custom/custom_import.h"
 +#include "data/data_peer.h"
 +#include "data/data_session.h"
 +#include "data/data_types.h"
@@ -531,6 +1144,8 @@ index 0000000..28f3899
 +#include "main/main_session.h"
 +#include "window/window_session_controller.h"
 +
++#include <QtGui/QDragEnterEvent>
++#include <QtGui/QDropEvent>
 +#include <QtGui/QPainter>
 +#include <QtWidgets/QLabel>
 +#include <QtWidgets/QLineEdit>
@@ -570,6 +1185,7 @@ index 0000000..28f3899
 +, _hint(new QLabel(QString::fromUtf8("底部显示搜索结果"), this))
 +, _list(new QListWidget(this))
 +, _timer([=] { requestSearch(); }) {
++	setAcceptDrops(true);
 +	_title->setStyleSheet("color:#c2410c;font-weight:700;font-size:12px;");
 +	_query->setPlaceholderText(QString::fromUtf8("输入关键词，搜这个号的全部消息"));
 +	_query->setClearButtonEnabled(true);
@@ -641,6 +1257,21 @@ index 0000000..28f3899
 +	auto p = QPainter(this);
 +	p.fillRect(rect(), QColor(244, 246, 248));
 +	p.fillRect(0, 0, 3, height(), QColor(194, 65, 12));
++}
++
++void SearchPanel::dragEnterEvent(QDragEnterEvent *e) {
++	if (!ZipPathsFromMime(e->mimeData()).isEmpty()) {
++		e->setDropAction(Qt::CopyAction);
++		e->accept();
++	}
++}
++
++void SearchPanel::dropEvent(QDropEvent *e) {
++	if (TryImportDroppedZip(
++			e->mimeData(),
++			&_controller->session().domain())) {
++		e->acceptProposedAction();
++	}
 +}
 +
 +bool SearchPanel::matchFilter(not_null<PeerData*> peer) const {
@@ -751,10 +1382,10 @@ index 0000000..28f3899
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_search_panel.h b/Telegram/SourceFiles/custom/custom_search_panel.h
 new file mode 100644
-index 0000000..049b9d8
+index 0000000..470ae62
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_search_panel.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,66 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
@@ -763,6 +1394,8 @@ index 0000000..049b9d8
 +#include "mtproto/sender.h"
 +
 +class PeerData;
++class QDragEnterEvent;
++class QDropEvent;
 +class QLineEdit;
 +class QPushButton;
 +class QListWidget;
@@ -791,6 +1424,8 @@ index 0000000..049b9d8
 +
 +	void resizeEvent(QResizeEvent *e) override;
 +	void paintEvent(QPaintEvent *e) override;
++	void dragEnterEvent(QDragEnterEvent *e) override;
++	void dropEvent(QDropEvent *e) override;
 +
 +	void setFilter(Filter filter);
 +	void requestSearch();
@@ -875,6 +1510,44 @@ index 72139bc..cc31c84 100644
  	[[nodiscard]] int unreadBadgeIgnoreOne(Dialogs::Key key) const;
  	[[nodiscard]] bool unreadBadgeMutedIgnoreOne(Dialogs::Key key) const;
  	[[nodiscard]] int unreadOnlyMutedBadge() const;
+diff --git a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
+index b3e4c28..6a31ba4 100644
+--- a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
++++ b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
+@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "dialogs/dialogs_widget.h"
+ 
++#include "custom/custom_import.h"
+ #include "base/call_delayed.h"
+ #include "base/qt/qt_key_modifiers.h"
+ #include "base/options.h"
+@@ -3826,6 +3827,12 @@ void Widget::dragEnterEvent(QDragEnterEvent *e) {
+ 
+ 	const auto data = e->mimeData();
+ 	_dragInScroll = false;
++	if (!Custom::ZipPathsFromMime(data).isEmpty()) {
++		e->setDropAction(Qt::CopyAction);
++		e->accept();
++		_chooseByDragTimer.cancel();
++		return;
++	}
+ 	_dragForward = !controller()->adaptive().isOneColumn()
+ 		&& data->hasFormat(u"application/x-td-forward"_q);
+ 	if (_dragForward) {
+@@ -3890,6 +3897,12 @@ void Widget::updateDragInScroll(bool inScroll) {
+ 
+ void Widget::dropEvent(QDropEvent *e) {
+ 	_chooseByDragTimer.cancel();
++	if (Custom::TryImportDroppedZip(
++			e->mimeData(),
++			&controller()->session().domain())) {
++		e->acceptProposedAction();
++		return;
++	}
+ 	if (_scroll->geometry().contains(e->pos())) {
+ 		const auto globalPosition = mapToGlobal(e->pos());
+ 		const auto thread = _suggestions
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
 index efd667d..d6364e1 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
@@ -992,18 +1665,28 @@ index eef6d0e..1f41217 100644
  	void activate(not_null<Main::Account*> account);
  	void addActivated(MTP::Environment environment, bool newWindow = false);
 diff --git a/Telegram/SourceFiles/mainwidget.cpp b/Telegram/SourceFiles/mainwidget.cpp
-index baf29c7..840f357 100644
+index baf29c7..523ba47 100644
 --- a/Telegram/SourceFiles/mainwidget.cpp
 +++ b/Telegram/SourceFiles/mainwidget.cpp
-@@ -52,6 +52,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -52,6 +52,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "chat_helpers/message_field.h"
  #include "info/info_memento.h"
  #include "apiwrap.h"
++#include "custom/custom_import.h"
 +#include "custom/custom_search_panel.h"
  #include "dialogs/dialogs_widget.h"
  #include "history/history_widget.h"
  #include "history/history_drag_area.h"
-@@ -280,6 +281,9 @@ MainWidget::MainWidget(
+@@ -102,6 +104,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ 
+ #include <QtCore/QCoreApplication>
+ #include <QtCore/QMimeData>
++#include <QtGui/QDragEnterEvent>
++#include <QtGui/QDropEvent>
+ 
+ namespace {
+ 
+@@ -280,11 +284,15 @@ MainWidget::MainWidget(
  		Dialogs::Widget::Layout::Main)
  	: nullptr)
  , _history(std::in_place, this, _controller)
@@ -1013,7 +1696,13 @@ index baf29c7..840f357 100644
  , _sideShadow(_dialogs
  	? base::make_unique_q<Ui::PlainShadow>(this)
  	: nullptr)
-@@ -2409,6 +2413,9 @@ void MainWidget::orderWidgets() {
+ , _playerPlaylist(this, _controller)
+ , _changelogs(Core::Changelogs::Create(&controller->session())) {
++	setAcceptDrops(true);
+ 	if (_dialogs) {
+ 		setupConnectingWidget();
+ 	}
+@@ -2409,6 +2417,9 @@ void MainWidget::orderWidgets() {
  	if (_dialogs) {
  		_dialogs->raiseWithTooltip();
  	}
@@ -1023,7 +1712,7 @@ index baf29c7..840f357 100644
  	if (_player) {
  		_player->raise();
  	}
-@@ -2562,6 +2569,9 @@ void MainWidget::hideAll() {
+@@ -2562,6 +2573,9 @@ void MainWidget::hideAll() {
  	if (_dialogs) {
  		_dialogs->hide();
  	}
@@ -1033,7 +1722,7 @@ index baf29c7..840f357 100644
  	_history->hide();
  	if (_mainSection) {
  		_mainSection->hide();
-@@ -2592,6 +2602,9 @@ void MainWidget::showAll() {
+@@ -2592,6 +2606,9 @@ void MainWidget::showAll() {
  			tr::lng_cloud_password_updated()));
  	}
  	if (isOneColumn()) {
@@ -1043,7 +1732,7 @@ index baf29c7..840f357 100644
  		if (_sideShadow) {
  			_sideShadow->hide();
  		}
-@@ -2621,6 +2634,9 @@ void MainWidget::showAll() {
+@@ -2621,6 +2638,9 @@ void MainWidget::showAll() {
  		if (_dialogs) {
  			_dialogs->showFast();
  		}
@@ -1053,7 +1742,29 @@ index baf29c7..840f357 100644
  		if (_mainSection) {
  			_mainSection->show();
  		} else {
-@@ -2745,12 +2761,24 @@ void MainWidget::updateControlsGeometry() {
+@@ -2657,6 +2677,21 @@ void MainWidget::resizeEvent(QResizeEvent *e) {
+ 	updateControlsGeometry();
+ }
+ 
++void MainWidget::dragEnterEvent(QDragEnterEvent *e) {
++	if (!Custom::ZipPathsFromMime(e->mimeData()).isEmpty()) {
++		e->setDropAction(Qt::CopyAction);
++		e->accept();
++	}
++}
++
++void MainWidget::dropEvent(QDropEvent *e) {
++	if (Custom::TryImportDroppedZip(
++			e->mimeData(),
++			&_controller->session().domain())) {
++		e->acceptProposedAction();
++	}
++}
++
+ void MainWidget::updateMainSectionShown() {
+ 	_controller->setMainSectionShown(_mainSection || _history->peer());
+ }
+@@ -2745,12 +2780,24 @@ void MainWidget::updateControlsGeometry() {
  			mainSectionGeometry,
  			_contentScrollAddToY);
  		if (_hider) _hider->setGeometry(0, 0, dialogsWidth, height());
@@ -1079,7 +1790,7 @@ index baf29c7..840f357 100644
  				thirdSectionTop,
  				thirdSectionWidth,
  				height() - thirdSectionTop);
-@@ -2760,7 +2788,7 @@ void MainWidget::updateControlsGeometry() {
+@@ -2760,7 +2807,7 @@ void MainWidget::updateControlsGeometry() {
  		if (_dialogs) {
  			accumulate_min(
  				dialogsWidth,
@@ -1088,7 +1799,7 @@ index baf29c7..840f357 100644
  			_dialogs->setGeometryToLeft(0, 0, dialogsWidth, height());
  		}
  		if (_sideShadow) {
-@@ -2772,14 +2800,15 @@ void MainWidget::updateControlsGeometry() {
+@@ -2772,14 +2819,15 @@ void MainWidget::updateControlsGeometry() {
  		}
  		if (_thirdShadow) {
  			_thirdShadow->setGeometryToLeft(
@@ -1107,7 +1818,7 @@ index baf29c7..840f357 100644
  			_callTopBar->resizeToWidth(mainSectionWidth);
  			_callTopBar->moveToLeft(dialogsWidth, 0);
 diff --git a/Telegram/SourceFiles/mainwidget.h b/Telegram/SourceFiles/mainwidget.h
-index 82a35ec..399e2ab 100644
+index 82a35ec..5e8f2b7 100644
 --- a/Telegram/SourceFiles/mainwidget.h
 +++ b/Telegram/SourceFiles/mainwidget.h
 @@ -72,6 +72,10 @@ template <typename Widget>
@@ -1121,7 +1832,16 @@ index 82a35ec..399e2ab 100644
  namespace Window {
  class SessionController;
  template <typename Inner>
-@@ -349,6 +353,7 @@ private:
+@@ -233,6 +237,8 @@ public:
+ private:
+ 	void paintEvent(QPaintEvent *e) override;
+ 	void resizeEvent(QResizeEvent *e) override;
++	void dragEnterEvent(QDragEnterEvent *e) override;
++	void dropEvent(QDropEvent *e) override;
+ 	bool eventFilter(QObject *o, QEvent *e) override;
+ 
+ 	[[nodiscard]] bool relevantForDialogsFocus(
+@@ -349,6 +355,7 @@ private:
  
  	const base::unique_qptr<Dialogs::Widget> _dialogs;
  	const base::unique_qptr<HistoryWidget> _history;
@@ -1130,7 +1850,7 @@ index 82a35ec..399e2ab 100644
  	object_ptr<Window::SectionWidget> _thirdSection = { nullptr };
  	std::shared_ptr<Window::SectionMemento> _thirdSectionFromStack;
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
-index a1e5ece..ad2860a 100644
+index a1e5ece..f892fcf 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
 +++ b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 @@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -1141,15 +1861,16 @@ index a1e5ece..ad2860a 100644
  #include "ui/unread_badge_paint.h"
  #include "ui/ui_utility.h"
  #include "core/application.h"
-@@ -55,6 +56,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -55,6 +56,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "main/main_account.h"
  #include "main/main_session.h"
  #include "main/main_domain.h"
++#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
  #include "mtproto/mtproto_dc_options.h"
  #include "window/window_session_controller.h"
  #include "window/window_controller.h"
-@@ -227,6 +229,7 @@ private:
+@@ -227,6 +230,7 @@ private:
  	const not_null<Window::SessionController*> _controller;
  	const not_null<Ui::VerticalLayout*> _outer;
  	int _outerIndex = 0;
@@ -1157,7 +1878,7 @@ index a1e5ece..ad2860a 100644
  
  	Ui::SlideWrap<Ui::SettingsButton> *_addAccount = nullptr;
  	base::flat_map<
-@@ -867,8 +870,23 @@ void SetupAccountsWrap(
+@@ -867,8 +871,23 @@ void SetupAccountsWrap(
  
  		Ui::RpWidget userpic;
  		Ui::PeerUserpicView view;
@@ -1181,7 +1902,7 @@ index a1e5ece..ad2860a 100644
  
  	const auto userpicSkip = 2 * st::mainMenuAccountLine + st::lineWidth;
  	const auto userpicSize = st::mainMenuAccountSize
-@@ -888,7 +906,22 @@ void SetupAccountsWrap(
+@@ -888,7 +907,22 @@ void SetupAccountsWrap(
  		const auto line = st::mainMenuAccountLine;
  		const auto skip = 2 * line + st::lineWidth;
  		const auto full = size + skip * 2;
@@ -1204,7 +1925,17 @@ index a1e5ece..ad2860a 100644
  		if (active) {
  			const auto shift = st::lineWidth + (line * 0.5);
  			const auto diameter = full - 2 * shift;
-@@ -986,6 +1019,21 @@ Ui::RpWidget *AccountsList::addAccountButton() const {
+@@ -928,6 +962,9 @@ void SetupAccountsWrap(
+ 			Info::Profile::CopyPhoneToClipboard(
+ 				Info::Profile::PhoneValue(session->user()));
+ 		}, &st::menuIconCopy);
++		addAction(QString::fromUtf8("导出此帐号并删除"), [=] {
++			Custom::ChooseAndExportOne(raw, account);
++		}, &st::menuIconCopy);
+ 
+ 		if (!locked) {
+ 			if (!isActive) {
+@@ -986,6 +1023,21 @@ Ui::RpWidget *AccountsList::addAccountButton() const {
  }
  
  void AccountsList::setup() {
@@ -1212,7 +1943,7 @@ index a1e5ece..ad2860a 100644
 +		object_ptr<Ui::InputField>(
 +			_outer.get(),
 +			st::defaultInputField,
-+			rpl::single(QString::fromUtf8("搜索帐号 / 手机号 / 用户名"))));
++			rpl::single(QString::fromUtf8("搜索帐号名称 / 手机号"))));
 +	search->changes(
 +	) | rpl::on_next([=] {
 +		_query = search->getLastText().trimmed();
@@ -1226,7 +1957,7 @@ index a1e5ece..ad2860a 100644
  	_addAccount = setupAdd();
  
  	rpl::single(rpl::empty) | rpl::then(
-@@ -1056,7 +1104,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1056,7 +1108,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  				found = true;
  			}
  		}
@@ -1235,7 +1966,7 @@ index a1e5ece..ad2860a 100644
  			_controller->show(
  				Box(AccountsLimitBox, &_controller->session()));
  		} else if (newWindow) {
-@@ -1069,6 +1117,18 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1069,6 +1121,27 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  		}
  	};
  
@@ -1250,22 +1981,25 @@ index a1e5ece..ad2860a 100644
 +			_outer.get(),
 +			&_controller->session().domain());
 +	});
++	const auto exportBtn = _outer->add(
++		CreateButtonWithIcon(
++			_outer.get(),
++			rpl::single(QString::fromUtf8("批量导出帐号包")),
++			st::mainMenuAddAccountButton,
++			{ &st::settingsIconAdd, IconType::Round, &st::windowBgActive }));
++	exportBtn->addClickHandler([=] {
++		Custom::ChooseAndExportAccounts(_controller);
++	});
 +
  	button->setAcceptBoth(true);
  	button->clicks(
  	) | rpl::on_next([=](Qt::MouseButton which) {
-@@ -1140,6 +1200,18 @@ void AccountsList::rebuild() {
+@@ -1140,6 +1213,12 @@ void AccountsList::rebuild() {
  		Assert(i != _watched.end());
  
  		auto &button = i->second;
 +		if (account->sessionExists() && !_query.isEmpty()) {
-+			const auto user = account->session().user();
-+			auto haystack = user->name()
-+				+ '@'
-+				+ user->username()
-+				+ user->phone()
-+				+ QString::number(user->id().bare);
-+			if (!haystack.contains(_query, Qt::CaseInsensitive)) {
++			if (!Custom::AccountMatchesQuery(account, _query)) {
 +				button = nullptr;
 +				continue;
 +			}
@@ -1290,13 +2024,14 @@ index 02d784e..155ab43 100644
  		{ C::ShowAllChats, tr::lng_shortcuts_show_all_chats() },
  		{ C::ShowFolder1, folder(1) },
 diff --git a/Telegram/SourceFiles/settings/settings_enhanced.cpp b/Telegram/SourceFiles/settings/settings_enhanced.cpp
-index 5fa9f81..aa936c6 100644
+index 5fa9f81..0b29269 100644
 --- a/Telegram/SourceFiles/settings/settings_enhanced.cpp
 +++ b/Telegram/SourceFiles/settings/settings_enhanced.cpp
-@@ -39,6 +39,11 @@ https://github.com/TDesktop-x64/tdesktop/blob/dev/LEGAL
+@@ -39,6 +39,12 @@ https://github.com/TDesktop-x64/tdesktop/blob/dev/LEGAL
  #include "styles/style_settings.h"
  #include "apiwrap.h"
  #include "api/api_blocked_peers.h"
++#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
 +#include "main/main_domain.h"
 +#include "ui/layers/generic_box.h"
@@ -1305,7 +2040,7 @@ index 5fa9f81..aa936c6 100644
  
  namespace Settings {
  
-@@ -572,6 +577,59 @@ namespace Settings {
+@@ -572,6 +578,67 @@ namespace Settings {
  			EnhancedSettings::Write();
  		}, container->lifetime());
  
@@ -1360,6 +2095,14 @@ index 5fa9f81..aa936c6 100644
 +			Custom::ChooseAndImportAccountPack(
 +				nullptr,
 +				&Core::App().domain());
++		});
++
++		AddButtonWithIcon(
++				container,
++				rpl::single(QString::fromUtf8("批量导出帐号包 (导出后删除)")),
++				st::settingsButtonNoIcon
++		)->addClickHandler([=] {
++			Custom::ChooseAndExportAccounts(controller);
 +		});
 +
  		AddSkip(container);
