@@ -1,5 +1,5 @@
 diff --git a/Telegram/CMakeLists.txt b/Telegram/CMakeLists.txt
-index e3a23be..9811a8b 100644
+index e3a23be..54cb2ae 100644
 --- a/Telegram/CMakeLists.txt
 +++ b/Telegram/CMakeLists.txt
 @@ -100,6 +100,10 @@ PRIVATE
@@ -13,13 +13,15 @@ index e3a23be..9811a8b 100644
  if (NOT DESKTOP_APP_DISABLE_SWIFT6)
      telegram_add_apple_swift_runtime(Telegram)
  endif()
-@@ -1465,6 +1469,9 @@ PRIVATE
+@@ -1465,6 +1469,11 @@ PRIVATE
      main/main_app_config_values.h
      main/main_domain.cpp
      main/main_domain.h
 +    custom/custom_import.cpp
 +    custom/custom_import.h
 +    custom/custom_personal.h
++    custom/custom_search_panel.cpp
++    custom/custom_search_panel.h
      main/main_session.cpp
      main/main_session.h
      main/main_session_settings.cpp
@@ -512,6 +514,309 @@ index 0000000..41f03a2
 +}
 +
 +} // namespace Custom
+diff --git a/Telegram/SourceFiles/custom/custom_search_panel.cpp b/Telegram/SourceFiles/custom/custom_search_panel.cpp
+new file mode 100644
+index 0000000..28f3899
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_search_panel.cpp
+@@ -0,0 +1,229 @@
++#include "custom/custom_search_panel.h"
++
++#include "apiwrap.h"
++#include "data/data_peer.h"
++#include "data/data_session.h"
++#include "data/data_types.h"
++#include "history/history.h"
++#include "history/history_item.h"
++#include "main/main_session.h"
++#include "window/window_session_controller.h"
++
++#include <QtGui/QPainter>
++#include <QtWidgets/QLabel>
++#include <QtWidgets/QLineEdit>
++#include <QtWidgets/QListWidget>
++#include <QtWidgets/QPushButton>
++
++namespace Custom {
++namespace {
++
++[[nodiscard]] QString KindLabel(not_null<PeerData*> peer) {
++	if (peer->isUser()) {
++		return peer->isBot()
++			? QString::fromUtf8("机器人")
++			: QString::fromUtf8("用户");
++	} else if (peer->isChat() || peer->isMegagroup()) {
++		return QString::fromUtf8("群组");
++	} else if (peer->isBroadcast()) {
++		return QString::fromUtf8("频道");
++	}
++	return QString::fromUtf8("其他");
++}
++
++} // namespace
++
++SearchPanel::SearchPanel(
++	QWidget *parent,
++	not_null<Window::SessionController*> controller)
++: Ui::RpWidget(parent)
++, _controller(controller)
++, _title(new QLabel(QString::fromUtf8("当前帐号消息搜索"), this))
++, _query(new QLineEdit(this))
++, _all(new QPushButton(QString::fromUtf8("全部"), this))
++, _user(new QPushButton(QString::fromUtf8("用户"), this))
++, _group(new QPushButton(QString::fromUtf8("群组"), this))
++, _channel(new QPushButton(QString::fromUtf8("频道"), this))
++, _bot(new QPushButton(QString::fromUtf8("机器人"), this))
++, _hint(new QLabel(QString::fromUtf8("底部显示搜索结果"), this))
++, _list(new QListWidget(this))
++, _timer([=] { requestSearch(); }) {
++	_title->setStyleSheet("color:#c2410c;font-weight:700;font-size:12px;");
++	_query->setPlaceholderText(QString::fromUtf8("输入关键词，搜这个号的全部消息"));
++	_query->setClearButtonEnabled(true);
++	_hint->setStyleSheet("color:#7a8790;font-size:11px;");
++	_list->setStyleSheet(
++		"QListWidget{border:0;background:#fff;}"
++		"QListWidget::item{padding:8px;border-bottom:1px solid #eef1f3;}");
++	const auto buttons = { _all, _user, _group, _channel, _bot };
++	for (const auto button : buttons) {
++		button->setCheckable(true);
++		button->setCursor(Qt::PointingHandCursor);
++		button->setStyleSheet(
++			"QPushButton{background:#fff;border:1px solid #d5dde3;"
++			"border-radius:8px;padding:4px 8px;}"
++			"QPushButton:checked{background:#3390ec;color:#fff;border:0;}");
++	}
++	_all->setChecked(true);
++
++	connect(_query, &QLineEdit::textChanged, this, [=](const QString &text) {
++		_text = text.trimmed();
++		_timer.cancel();
++		if (_text.isEmpty()) {
++			_list->clear();
++			_hits.clear();
++			_hint->setText(QString::fromUtf8("底部显示搜索结果"));
++			return;
++		}
++		_timer.callOnce(320);
++	});
++	connect(_all, &QPushButton::clicked, this, [=] { setFilter(Filter::All); });
++	connect(_user, &QPushButton::clicked, this, [=] { setFilter(Filter::User); });
++	connect(_group, &QPushButton::clicked, this, [=] { setFilter(Filter::Group); });
++	connect(_channel, &QPushButton::clicked, this, [=] { setFilter(Filter::Channel); });
++	connect(_bot, &QPushButton::clicked, this, [=] { setFilter(Filter::Bot); });
++	connect(_list, &QListWidget::itemClicked, this, [=](QListWidgetItem *) {
++		openRow(_list->currentRow());
++	});
++}
++
++void SearchPanel::setFilter(Filter filter) {
++	_filter = filter;
++	_all->setChecked(filter == Filter::All);
++	_user->setChecked(filter == Filter::User);
++	_group->setChecked(filter == Filter::Group);
++	_channel->setChecked(filter == Filter::Channel);
++	_bot->setChecked(filter == Filter::Bot);
++	if (!_text.isEmpty()) {
++		requestSearch();
++	}
++}
++
++void SearchPanel::resizeEvent(QResizeEvent *e) {
++	_title->setGeometry(10, 8, width() - 20, 18);
++	_query->setGeometry(10, 30, width() - 20, 32);
++	auto x = 10;
++	const auto y = 70;
++	const auto w = (width() - 28) / 3;
++	_all->setGeometry(x, y, w, 26); x += w + 4;
++	_user->setGeometry(x, y, w, 26); x += w + 4;
++	_group->setGeometry(x, y, w, 26);
++	x = 10;
++	_channel->setGeometry(x, y + 30, w, 26); x += w + 4;
++	_bot->setGeometry(x, y + 30, w, 26);
++	_hint->setGeometry(10, 132, width() - 20, 18);
++	_list->setGeometry(0, 154, width(), height() - 154);
++}
++
++void SearchPanel::paintEvent(QPaintEvent *e) {
++	auto p = QPainter(this);
++	p.fillRect(rect(), QColor(244, 246, 248));
++	p.fillRect(0, 0, 3, height(), QColor(194, 65, 12));
++}
++
++bool SearchPanel::matchFilter(not_null<PeerData*> peer) const {
++	switch (_filter) {
++	case Filter::All: return true;
++	case Filter::User: return peer->isUser() && !peer->isBot();
++	case Filter::Group: return peer->isChat() || peer->isMegagroup();
++	case Filter::Channel: return peer->isBroadcast();
++	case Filter::Bot: return peer->isUser() && peer->isBot();
++	}
++	return true;
++}
++
++void SearchPanel::requestSearch() {
++	if (_text.isEmpty()) {
++		return;
++	}
++	auto &api = _controller->session().api();
++	if (_requestId) {
++		api.request(base::take(_requestId)).cancel();
++	}
++	using Flag = MTPmessages_SearchGlobal::Flag;
++	auto flags = Flag::f_folder_id;
++	if (_filter == Filter::User || _filter == Filter::Bot) {
++		flags |= Flag::f_users_only;
++	} else if (_filter == Filter::Group) {
++		flags |= Flag::f_groups_only;
++	} else if (_filter == Filter::Channel) {
++		flags |= Flag::f_broadcasts_only;
++	}
++	_hint->setText(QString::fromUtf8("搜索中…"));
++	_requestId = api.request(MTPmessages_SearchGlobal(
++		MTP_flags(flags),
++		MTP_int(0),
++		MTPInputChannel(),
++		MTP_string(_text),
++		MTP_inputMessagesFilterEmpty(),
++		MTP_int(0),
++		MTP_int(0),
++		MTP_int(0),
++		MTP_inputPeerEmpty(),
++		MTP_int(0),
++		MTP_int(50)
++	)).done([=](const MTPmessages_Messages &result) {
++		_requestId = 0;
++		applyResult(result);
++	}).fail([=] {
++		_requestId = 0;
++		_hint->setText(QString::fromUtf8("搜索失败"));
++	}).send();
++}
++
++void SearchPanel::applyResult(const MTPmessages_Messages &result) {
++	auto &owner = _controller->session().data();
++	_list->clear();
++	_hits.clear();
++
++	const auto consume = [&](const auto &data) {
++		owner.processUsers(data.vusers());
++		owner.processChats(data.vchats());
++		for (const auto &message : data.vmessages().v) {
++			const auto item = owner.addNewMessage(
++				message,
++				MessageFlags(),
++				NewMessageType::Existing);
++			if (!item) {
++				continue;
++			}
++			const auto peer = item->history()->peer;
++			if (!matchFilter(peer)) {
++				continue;
++			}
++			_hits.push_back(item->fullId());
++			const auto snippet = item->notificationText().text;
++			_list->addItem(peer->name()
++				+ u"  ["_q
++				+ KindLabel(peer)
++				+ u"]\n"_q
++				+ snippet);
++		}
++	};
++	result.match([&](const MTPDmessages_messages &data) {
++		consume(data);
++	}, [&](const MTPDmessages_messagesSlice &data) {
++		consume(data);
++	}, [&](const MTPDmessages_channelMessages &data) {
++		consume(data);
++	}, [&](const MTPDmessages_messagesNotModified &) {
++	});
++	_hint->setText(QString::fromUtf8("底部结果 · %1 条").arg(_hits.size()));
++}
++
++void SearchPanel::openRow(int row) {
++	if (row < 0 || row >= int(_hits.size())) {
++		return;
++	}
++	const auto id = _hits[row];
++	const auto item = _controller->session().data().message(id);
++	if (!item) {
++		return;
++	}
++	_controller->showPeerHistory(
++		item->history()->peer,
++		Window::SectionShow::Way::Forward,
++		item->fullId().msg);
++}
++
++} // namespace Custom
+diff --git a/Telegram/SourceFiles/custom/custom_search_panel.h b/Telegram/SourceFiles/custom/custom_search_panel.h
+new file mode 100644
+index 0000000..049b9d8
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_search_panel.h
+@@ -0,0 +1,62 @@
++#pragma once
++
++#include "ui/rp_widget.h"
++#include "base/timer.h"
++#include "data/data_types.h"
++#include "mtproto/sender.h"
++
++class PeerData;
++class QLineEdit;
++class QPushButton;
++class QListWidget;
++class QLabel;
++
++namespace Window {
++class SessionController;
++} // namespace Window
++
++namespace Custom {
++
++class SearchPanel final : public Ui::RpWidget {
++public:
++	SearchPanel(
++		QWidget *parent,
++		not_null<Window::SessionController*> controller);
++
++private:
++	enum class Filter {
++		All,
++		User,
++		Group,
++		Channel,
++		Bot,
++	};
++
++	void resizeEvent(QResizeEvent *e) override;
++	void paintEvent(QPaintEvent *e) override;
++
++	void setFilter(Filter filter);
++	void requestSearch();
++	void applyResult(const MTPmessages_Messages &result);
++	[[nodiscard]] bool matchFilter(not_null<PeerData*> peer) const;
++	void openRow(int row);
++
++	const not_null<Window::SessionController*> _controller;
++	QLabel *_title = nullptr;
++	QLineEdit *_query = nullptr;
++	QPushButton *_all = nullptr;
++	QPushButton *_user = nullptr;
++	QPushButton *_group = nullptr;
++	QPushButton *_channel = nullptr;
++	QPushButton *_bot = nullptr;
++	QLabel *_hint = nullptr;
++	QListWidget *_list = nullptr;
++
++	Filter _filter = Filter::All;
++	base::Timer _timer;
++	mtpRequestId _requestId = 0;
++	QString _text;
++	std::vector<FullMsgId> _hits;
++};
++
++} // namespace Custom
 diff --git a/Telegram/SourceFiles/data/data_session.cpp b/Telegram/SourceFiles/data/data_session.cpp
 index 06abb65..1362562 100644
 --- a/Telegram/SourceFiles/data/data_session.cpp
@@ -570,45 +875,6 @@ index 72139bc..cc31c84 100644
  	[[nodiscard]] int unreadBadgeIgnoreOne(Dialogs::Key key) const;
  	[[nodiscard]] bool unreadBadgeMutedIgnoreOne(Dialogs::Key key) const;
  	[[nodiscard]] int unreadOnlyMutedBadge() const;
-diff --git a/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp b/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp
-index fc7d740..ee74055 100644
---- a/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp
-+++ b/Telegram/SourceFiles/dialogs/dialogs_inner_widget.cpp
-@@ -50,6 +50,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
- #include "data/data_forum_topic.h"
- #include "data/data_chat.h"
- #include "data/data_user.h"
-+#include "custom/custom_personal.h"
-+#include "settings.h"
- #include "data/data_peer_values.h"
- #include "data/data_histories.h"
- #include "data/data_chat_filters.h"
-@@ -4718,6 +4720,12 @@ void InnerWidget::searchReceived(
- 	auto &results = toPreview ? _previewResults : _searchResults;
- 	for (const auto &item : messages) {
- 		const auto history = item->history();
-+		if (!gEnhancedOptions.contains("personal_unread_only")
-+			|| GetEnhancedBool("personal_unread_only")) {
-+			if (!Custom::IsPersonalUser(history->peer)) {
-+				continue;
-+			}
-+		}
- 		if (toPreview || !uniquePeers || !hasHistoryInResults(history)) {
- 			const auto index = int(results.size());
- 			const auto repaint = toPreview
-diff --git a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
-index b3e4c28..aebd56d 100644
---- a/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
-+++ b/Telegram/SourceFiles/dialogs/dialogs_widget.cpp
-@@ -410,7 +410,7 @@ Widget::Widget(
- 	.under = object_ptr<MenuUnderButton>(_searchControls),
- })
- , _searchForNarrowLayout(_searchControls, st::dialogsSearchForNarrowFilters)
--, _search(_searchControls, st::dialogsFilter, tr::lng_dlg_filter())
-+, _search(_searchControls, st::dialogsFilter, rpl::single(QString::fromUtf8("搜索消息关键词")))
- , _chooseFromUser(
- 	_searchControls,
- 	object_ptr<Ui::IconButton>(this, st::dialogsSearchFrom))
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
 index efd667d..d6364e1 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
@@ -725,6 +991,144 @@ index eef6d0e..1f41217 100644
  	void maybeActivate(not_null<Main::Account*> account);
  	void activate(not_null<Main::Account*> account);
  	void addActivated(MTP::Environment environment, bool newWindow = false);
+diff --git a/Telegram/SourceFiles/mainwidget.cpp b/Telegram/SourceFiles/mainwidget.cpp
+index baf29c7..840f357 100644
+--- a/Telegram/SourceFiles/mainwidget.cpp
++++ b/Telegram/SourceFiles/mainwidget.cpp
+@@ -52,6 +52,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "chat_helpers/message_field.h"
+ #include "info/info_memento.h"
+ #include "apiwrap.h"
++#include "custom/custom_search_panel.h"
+ #include "dialogs/dialogs_widget.h"
+ #include "history/history_widget.h"
+ #include "history/history_drag_area.h"
+@@ -280,6 +281,9 @@ MainWidget::MainWidget(
+ 		Dialogs::Widget::Layout::Main)
+ 	: nullptr)
+ , _history(std::in_place, this, _controller)
++, _searchPanel(_dialogs
++	? base::make_unique_q<Custom::SearchPanel>(this, controller)
++	: nullptr)
+ , _sideShadow(_dialogs
+ 	? base::make_unique_q<Ui::PlainShadow>(this)
+ 	: nullptr)
+@@ -2409,6 +2413,9 @@ void MainWidget::orderWidgets() {
+ 	if (_dialogs) {
+ 		_dialogs->raiseWithTooltip();
+ 	}
++	if (_searchPanel) {
++		_searchPanel->raise();
++	}
+ 	if (_player) {
+ 		_player->raise();
+ 	}
+@@ -2562,6 +2569,9 @@ void MainWidget::hideAll() {
+ 	if (_dialogs) {
+ 		_dialogs->hide();
+ 	}
++	if (_searchPanel) {
++		_searchPanel->hide();
++	}
+ 	_history->hide();
+ 	if (_mainSection) {
+ 		_mainSection->hide();
+@@ -2592,6 +2602,9 @@ void MainWidget::showAll() {
+ 			tr::lng_cloud_password_updated()));
+ 	}
+ 	if (isOneColumn()) {
++		if (_searchPanel) {
++			_searchPanel->hide();
++		}
+ 		if (_sideShadow) {
+ 			_sideShadow->hide();
+ 		}
+@@ -2621,6 +2634,9 @@ void MainWidget::showAll() {
+ 		if (_dialogs) {
+ 			_dialogs->showFast();
+ 		}
++		if (_searchPanel) {
++			_searchPanel->show();
++		}
+ 		if (_mainSection) {
+ 			_mainSection->show();
+ 		} else {
+@@ -2745,12 +2761,24 @@ void MainWidget::updateControlsGeometry() {
+ 			mainSectionGeometry,
+ 			_contentScrollAddToY);
+ 		if (_hider) _hider->setGeometry(0, 0, dialogsWidth, height());
++		if (_searchPanel) {
++			_searchPanel->hide();
++		}
+ 	} else {
++		const auto searchWidth = _searchPanel ? 300 : 0;
++		if (_searchPanel) {
++			_searchPanel->setGeometry(
++				width() - searchWidth,
++				0,
++				searchWidth,
++				height());
++			_searchPanel->show();
++		}
+ 		auto thirdSectionWidth = _thirdSection ? _thirdColumnWidth : 0;
+ 		if (_thirdSection) {
+ 			auto thirdSectionTop = getThirdSectionTop();
+ 			_thirdSection->setGeometry(
+-				width() - thirdSectionWidth,
++				width() - searchWidth - thirdSectionWidth,
+ 				thirdSectionTop,
+ 				thirdSectionWidth,
+ 				height() - thirdSectionTop);
+@@ -2760,7 +2788,7 @@ void MainWidget::updateControlsGeometry() {
+ 		if (_dialogs) {
+ 			accumulate_min(
+ 				dialogsWidth,
+-				width() - st::columnMinimalWidthMain);
++				width() - st::columnMinimalWidthMain - searchWidth);
+ 			_dialogs->setGeometryToLeft(0, 0, dialogsWidth, height());
+ 		}
+ 		if (_sideShadow) {
+@@ -2772,14 +2800,15 @@ void MainWidget::updateControlsGeometry() {
+ 		}
+ 		if (_thirdShadow) {
+ 			_thirdShadow->setGeometryToLeft(
+-				width() - thirdSectionWidth - st::lineWidth,
++				width() - searchWidth - thirdSectionWidth - st::lineWidth,
+ 				shadowTop,
+ 				st::lineWidth,
+ 				shadowHeight);
+ 		}
+ 		const auto mainSectionWidth = width()
+ 			- dialogsWidth
+-			- thirdSectionWidth;
++			- thirdSectionWidth
++			- searchWidth;
+ 		if (_callTopBar) {
+ 			_callTopBar->resizeToWidth(mainSectionWidth);
+ 			_callTopBar->moveToLeft(dialogsWidth, 0);
+diff --git a/Telegram/SourceFiles/mainwidget.h b/Telegram/SourceFiles/mainwidget.h
+index 82a35ec..399e2ab 100644
+--- a/Telegram/SourceFiles/mainwidget.h
++++ b/Telegram/SourceFiles/mainwidget.h
+@@ -72,6 +72,10 @@ template <typename Widget>
+ class SlideWrap;
+ } // namespace Ui
+ 
++namespace Custom {
++class SearchPanel;
++} // namespace Custom
++
+ namespace Window {
+ class SessionController;
+ template <typename Inner>
+@@ -349,6 +353,7 @@ private:
+ 
+ 	const base::unique_qptr<Dialogs::Widget> _dialogs;
+ 	const base::unique_qptr<HistoryWidget> _history;
++	const base::unique_qptr<Custom::SearchPanel> _searchPanel;
+ 	object_ptr<Window::SectionWidget> _mainSection = { nullptr };
+ 	object_ptr<Window::SectionWidget> _thirdSection = { nullptr };
+ 	std::shared_ptr<Window::SectionMemento> _thirdSectionFromStack;
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 index a1e5ece..ad2860a 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
