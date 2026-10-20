@@ -10,7 +10,9 @@ on:
 jobs:
   macos:
     name: MacOS Intel
-    runs-on: macos-latest
+    # macos-latest is an M1 with 7 GB RAM. This job compiles x86_64,
+    # and that machine swaps until clang stops returning.
+    runs-on: macos-15-intel
     timeout-minutes: 360
     env:
       UPLOAD_ARTIFACT: "true"
@@ -56,7 +58,7 @@ jobs:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Logs/Homebrew
-          key: brew-${{ runner.os }}-v1
+          key: brew-${{ runner.os }}-${{ runner.arch }}-v1
 
       - name: First set up
         env:
@@ -68,7 +70,9 @@ jobs:
           brew install automake libtool meson nasm ninja pkg-config ccache
           sudo mdutil -a -i off || true
           sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-          sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' /opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake || true
+          sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' /opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake \
+            || sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' /usr/local/share/cmake/Modules/Compiler/GNU.cmake \
+            || true
 
       - name: Save Homebrew cache
         if: steps.cache-brew.outputs.cache-hit != 'true'
@@ -78,7 +82,7 @@ jobs:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Logs/Homebrew
-          key: brew-${{ runner.os }}-v1
+          key: brew-${{ runner.os }}-${{ runner.arch }}-v1
 
       - name: Libraries cache
         id: cache-libs
@@ -87,11 +91,10 @@ jobs:
           path: |
             Libraries
             ThirdParty
-          key: ${{ runner.os }}-libs-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('tdesktop/Telegram/build/prepare/prepare.py') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-libs-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('tdesktop/Telegram/build/prepare/prepare.py') }}
           restore-keys: |
-            ${{ runner.os }}-libs-debug-${{ env.UPSTREAM_SHA }}-
-            ${{ runner.os }}-libs-debug-
-            ${{ runner.os }}-libs-
+            ${{ runner.os }}-${{ runner.arch }}-libs-debug-${{ env.UPSTREAM_SHA }}-
+            ${{ runner.os }}-${{ runner.arch }}-libs-debug-
 
       - name: Libraries cache status
         run: |
@@ -101,8 +104,23 @@ jobs:
             echo "::notice::Libraries cache MISS — full prepare, then save before compile"
           fi
 
-      - name: Libraries
+      - name: Free disk before libraries
         run: |
+          set -eux
+          df -h /
+          rm -rf "$HOME/Library/Developer/CoreSimulator/Caches" || true
+          rm -rf "$HOME/Library/Developer/Xcode/DerivedData" || true
+          rm -rf "$HOME/Library/Developer/Xcode/Archives" || true
+          rm -rf "$HOME/Library/Developer/Xcode/iOS DeviceSupport" || true
+          rm -rf "$HOME/Library/Developer/Xcode/watchOS DeviceSupport" || true
+          rm -rf "$HOME/Library/Developer/Xcode/tvOS DeviceSupport" || true
+          sudo rm -rf /usr/local/lib/android || true
+          df -h /
+
+      - name: Libraries
+        timeout-minutes: 100
+        run: |
+          defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasks -int 3
           ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent
 
       - name: Free up some disk space
@@ -118,17 +136,17 @@ jobs:
           path: |
             Libraries
             ThirdParty
-          key: ${{ runner.os }}-libs-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('tdesktop/Telegram/build/prepare/prepare.py') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-libs-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('tdesktop/Telegram/build/prepare/prepare.py') }}
 
       - name: Compile cache (ccache)
         id: cache-ccache
         uses: actions/cache/restore@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
           restore-keys: |
-            ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-
-            ${{ runner.os }}-ccache-debug-
+            ${{ runner.os }}-${{ runner.arch }}-ccache-debug-${{ env.UPSTREAM_SHA }}-
+            ${{ runner.os }}-${{ runner.arch }}-ccache-debug-
 
       - name: Compile cache status
         run: |
@@ -176,7 +194,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-ccache-debug-${{ env.UPSTREAM_SHA }}-${{ hashFiles('overlay/patches/0001-custom-features.patch') }}
 
       - name: Move artifact
         run: |
