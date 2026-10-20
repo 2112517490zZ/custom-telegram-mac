@@ -1,0 +1,78 @@
+# Mac 自定义 Telegram Desktop（按用户 2026-10-20 定稿）
+
+基于 64Gram / `TDesktop-x64/tdesktop`，外观一比一 Desktop。
+数据目录独立，不碰官方 Telegram。GitHub Actions 编 Mac 包。
+
+## 1. 自定义帐号上限
+
+- 设置里可填数字，填多少就能挂多少。
+- 编译期硬顶 `kMaxAccounts = 500`（再高内存会炸）。
+- 界面上限读设置，改数字不用重新编译。
+
+## 2. 快捷切换帐号
+
+- 左侧帐号栏点一下即切。
+- 默认快捷键：`Ctrl+1` … `Ctrl+9` 跳到第 1–9 个号；`Ctrl+Tab` / `Ctrl+Shift+Tab` 上一个/下一个。
+- 可在 `shortcuts-custom.json` 改。
+
+## 3. 左侧：搜索并跳转帐号
+
+搜索框匹配：
+
+- 手机号（文件夹名 / json.phone）
+- 昵称 first_name + last_name
+- username
+- user_id
+
+回车或点击即切到该号。
+
+## 4. 帐号跳动提示（只要个人消息）
+
+帐号头像/条目跳动 + 红点，仅当未读来自：
+
+- 真人私聊（User，且不是 bot）
+
+明确不算：
+
+- 群组
+- 频道
+- 机器人
+
+## 5. 右侧：关键词搜消息
+
+当前帐号内，按消息正文关键词搜，结果列表可点进对应对话。
+不搜群/频道/机器人（与第 4 条同一过滤器，可关）。
+
+## 6. 快捷导入：一个 zip 多个 tdata
+
+对标 `/www/wwwroot/模版/+1美国1-3年.zip`：
+
+```
+批次名.zip
+  批次名/
+    手机号/
+      手机号.json      # phone, user_id, first_name, twoFA, app_id...
+      手机号.session   # Telethon（备用，主用 tdata）
+      2FA.txt
+      tdata/
+        key_datas
+        D877F783D5D3EF8Cs
+        D877F783D5D3EF8C/maps
+```
+
+导入行为：
+
+- 菜单：文件 → 导入帐号包（zip / 文件夹）
+- 递归找所有带 `tdata/key_datas` 的目录
+- 忽略 `__MACOSX`、`.DS_Store`
+- 每个号作为一个客户端帐号加进去，不覆盖已登录号
+- json 里的 phone / 昵称 / username / user_id 写入左侧搜索索引
+- 有 2FA.txt 或 json.twoFA 则记下，登录遇到 2FA 自动填（失败再手动）
+- 超过当前上限时停下并提示去改上限
+- 导入进隔离 workdir，不动官方 Desktop
+
+## 7. 编译
+
+- GitHub Actions，`macos-latest`，`CMAKE_OSX_ARCHITECTURES=x86_64`（这台 Intel Mac）
+- 只跑 Mac Release，不跑 Linux/Windows，避免烧额度
+- 产物：`.app` 人工制品，拷到 T9 用隔离启动

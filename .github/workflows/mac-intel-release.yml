@@ -1,0 +1,92 @@
+name: Mac Intel Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  macos:
+    name: MacOS Intel
+    runs-on: macos-latest
+    timeout-minutes: 360
+    env:
+      UPLOAD_ARTIFACT: "true"
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+      UPSTREAM_SHA: "f4be0fac81507efa591db397489e255143a0c321"
+    steps:
+      - name: Checkout patches
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Clone 64Gram
+        uses: actions/checkout@v4
+        with:
+          repository: TDesktop-x64/tdesktop
+          ref: ${{ env.UPSTREAM_SHA }}
+          submodules: recursive
+          path: tdesktop
+
+      - name: Apply custom features
+        run: |
+          set -euo pipefail
+          cd tdesktop
+          git apply --whitespace=nowarn ../overlay/patches/0001-custom-features.patch
+          test -f Telegram/SourceFiles/custom/custom_import.cpp
+          echo "patch applied"
+
+      - name: First set up
+        run: |
+          sudo chown -R `whoami`:admin /usr/local/share || true
+          brew update
+          brew upgrade || true
+          brew install automake libtool meson nasm ninja pkg-config
+          sudo mdutil -a -i off || true
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' /opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake || true
+
+      - name: Libraries cache
+        id: cache-libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            Libraries
+            ThirdParty
+          key: ${{ runner.OS }}-libs-${{ env.UPSTREAM_SHA }}
+          restore-keys: ${{ runner.OS }}-libs-
+
+      - name: Libraries
+        run: |
+          ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent
+
+      - name: Free up some disk space
+          run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+
+      - name: Telegram Desktop build
+        run: |
+          cd tdesktop/Telegram
+          echo "ARTIFACT_NAME=CustomTelegram" >> "$GITHUB_ENV"
+          ./configure.sh \
+            -D CMAKE_CONFIGURATION_TYPES=Release \
+            -D CMAKE_OSX_ARCHITECTURES=x86_64 \
+            -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -D TDESKTOP_API_ID=2040 \
+            -D TDESKTOP_API_HASH=b18441a1ff607e10a989891a5462e627 \
+            -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON \
+            -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+          cmake --build ../out --config Release --parallel
+
+      - name: Move artifact
+        run: |
+          cd tdesktop/out/Release
+          mkdir -p artifact
+          mv Telegram.app artifact/ || mv 64Gram.app artifact/ || ls -la
+          ls -la artifact || true
+
+      - uses: actions/upload-artifact@v4
+        name: Upload artifact
+        with:
+          name: CustomTelegram
+          path: tdesktop/out/Release/artifact/
+          retention-days: 14
