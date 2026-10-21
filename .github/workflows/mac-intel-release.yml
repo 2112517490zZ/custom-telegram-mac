@@ -51,7 +51,7 @@ jobs:
           test -f Telegram/SourceFiles/custom/custom_search_panel.cpp
           echo "patch applied"
 
-      - name: Patch libjxl for Apple clang
+      - name: Patch prepare.py for Intel
         run: |
           set -euo pipefail
           python3 - << 'PY'
@@ -71,8 +71,28 @@ jobs:
                   ${cmake_defines}'''
           if text.count(old) != 1:
               raise SystemExit(f"libjxl mac block count={text.count(old)}")
-          p.write_text(text.replace(old, new, 1))
-          print("libjxl patched: x86_64 only, drop -march=x86-64")
+          text = text.replace(old, new, 1)
+
+          # The app is x86_64. Skip the arm64 Rust slice so the last library
+          # does not cross-compile a second release staticlib.
+          old_tlottie = """    buildOneArch aarch64-apple-darwin
+              buildOneArch x86_64-apple-darwin
+              mkdir -p $USED_PREFIX/lib $USED_PREFIX/include/tlottie
+              lipo -create target/aarch64-apple-darwin/release/libtlottie.a target/x86_64-apple-darwin/release/libtlottie.a -output $USED_PREFIX/lib/libtlottie.a"""
+          new_tlottie = """    buildOneArch x86_64-apple-darwin
+              mkdir -p $USED_PREFIX/lib $USED_PREFIX/include/tlottie
+              cp target/x86_64-apple-darwin/release/libtlottie.a $USED_PREFIX/lib/libtlottie.a"""
+          if text.count(old_tlottie) != 1:
+              raise SystemExit(f"tlottie mac block count={text.count(old_tlottie)}")
+          text = text.replace(old_tlottie, new_tlottie, 1)
+
+          old_rust = "        --target aarch64-apple-darwin \\\\\n"
+          if text.count(old_rust) != 1:
+              raise SystemExit(f"rust aarch64 target count={text.count(old_rust)}")
+          text = text.replace(old_rust, "", 1)
+
+          p.write_text(text)
+          print("prepare patched: libjxl x86_64, tlottie x86_64 only")
           PY
 
       - name: Homebrew cache
@@ -142,12 +162,60 @@ jobs:
           df -h /
 
       - name: Libraries
-        timeout-minutes: 180
+        timeout-minutes: 300
         run: |
           set -euo pipefail
           defaults write com.apple.dt.Xcode IDEBuildOperationMaxNumberOfConcurrentCompileTasks -int 3
           LOG="$RUNNER_TEMP/libraries.log"
           touch "$LOG"
+          # git clone writes nothing after "Cloning into" when stderr is not a
+          # tty. Run 39455898625 died here: tlottie's clone was still in
+          # git-remote-http, and the 8-minute watchdog treated silence as a hang.
+          mkdir -p "$RUNNER_TEMP/bin"
+          cat > "$RUNNER_TEMP/bin/git" << 'EOF'
+          #!/bin/bash
+          real=/usr/local/bin/git
+          if [ ! -x "$real" ]; then
+            real=/usr/bin/git
+          fi
+          if [ "${1:-}" != "clone" ]; then
+            exec "$real" "$@"
+          fi
+          attempt=1
+          while [ "$attempt" -le 4 ]; do
+            echo "git clone attempt ${attempt}: $*"
+            if "$real" -c http.version=HTTP/1.1 -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=120 clone --progress "${@:2}"; then
+              exit 0
+            fi
+            status=$?
+            echo "git clone attempt ${attempt} failed status=${status}"
+            dest=""
+            for arg in "${@:2}"; do
+              case "$arg" in
+                -*) ;;
+                *) dest="$arg" ;;
+              esac
+            done
+            if [ -n "$dest" ] && [[ "$dest" != *"://"* ]] && [ -d "$dest" ]; then
+              echo "removing partial clone $dest"
+              rm -rf "$dest"
+            elif [ -n "$dest" ] && [[ "$dest" == *"://"* ]]; then
+              base=$(basename "$dest" .git)
+              if [ -d "$base" ]; then
+                echo "removing partial clone $base"
+                rm -rf "$base"
+              fi
+            fi
+            attempt=$((attempt + 1))
+            sleep 15
+          done
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/bin/git"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
+          export GIT_TERMINAL_PROMPT=0
+          export PYTHONUNBUFFERED=1
+          export CARGO_TERM_VERBOSE=true
           # OpenSSL prints a full cc command for every file. After about 2 MB,
           # GitHub stops reading the step log and clang blocks on that pipe.
           ./tdesktop/Telegram/build/prepare/mac.sh skip-release silent >"$LOG" 2>&1 &
@@ -160,13 +228,19 @@ jobs:
             echo "$(date -u +%H:%M:%S) libraries pid=$pid bytes=$now"
             if [ "$now" = "$last" ]; then
               still=$((still + 30))
+              if [ "$still" -ge 180 ]; then
+                echo "quiet ${still}s, last log line:"
+                tail -n 1 "$LOG" | cut -c1-180
+              fi
             else
               still=0
               last=$now
             fi
-            if [ "$still" -ge 480 ]; then
-              echo "libraries produced no output for 8 minutes"
-              tail -n 30 "$LOG" | cut -c1-200
+            if [ "$still" -ge 1200 ]; then
+              echo "libraries produced no output for 20 minutes"
+              tail -n 60 "$LOG" | cut -c1-200
+              echo "---- error lines ----"
+              grep -E "error:|FAILED|fatal:" "$LOG" | tail -n 30 || true
               kill "$pid" 2>/dev/null || true
               wait "$pid" || true
               exit 1
@@ -258,8 +332,8 @@ jobs:
               still=0
               last=$now
             fi
-            if [ "$still" -ge 480 ]; then
-              echo "telegram build produced no output for 8 minutes"
+            if [ "$still" -ge 1200 ]; then
+              echo "telegram build produced no output for 20 minutes"
               tail -n 40 "$LOG" | cut -c1-200
               kill "$pid" 2>/dev/null || true
               wait "$pid" || true
