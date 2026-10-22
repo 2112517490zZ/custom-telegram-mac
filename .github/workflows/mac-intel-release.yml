@@ -49,10 +49,15 @@ jobs:
           git apply --whitespace=nowarn ../overlay/patches/0002-channel-link.patch
           git apply --check --whitespace=nowarn ../overlay/patches/0003-window-title.patch
           git apply --whitespace=nowarn ../overlay/patches/0003-window-title.patch
+          git apply --check --whitespace=nowarn ../overlay/patches/0004-panel-and-about.patch
+          git apply --whitespace=nowarn ../overlay/patches/0004-panel-and-about.patch
           test -f Telegram/SourceFiles/custom/custom_import.cpp
           test -f Telegram/SourceFiles/custom/custom_export.cpp
           test -f Telegram/SourceFiles/custom/custom_account_rail.cpp
           test -f Telegram/SourceFiles/custom/custom_search_panel.cpp
+          test -f Telegram/SourceFiles/custom/custom_control.cpp
+          grep -q 'ShowControlPanel' Telegram/SourceFiles/window/window_main_menu.cpp
+          grep -q '(void)Text2' Telegram/SourceFiles/boxes/about_box.cpp
           grep -q 'https://t.me/dengtajituan' Telegram/SourceFiles/window/window_main_menu.cpp
           grep -q '灯塔集团魔改TG客户端' Telegram/SourceFiles/window/main_window.cpp
           echo "patch applied"
