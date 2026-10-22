@@ -1,0 +1,59 @@
+diff --git a/Telegram/SourceFiles/boxes/about_box.cpp b/Telegram/SourceFiles/boxes/about_box.cpp
+index 671e5c6..7aa02e3 100644
+--- a/Telegram/SourceFiles/boxes/about_box.cpp
++++ b/Telegram/SourceFiles/boxes/about_box.cpp
+@@ -50,8 +50,8 @@ rpl::producer<TextWithEntities> Text2() {
+ 			"https://github.com/TDesktop-x64/tdesktop/blob/dev/LICENSE")),
+ 		lt_github_link,
+ 		rpl::single(tr::link(
+-			"GitHub",
+-			"https://github.com/TDesktop-x64/tdesktop")),
++			"@dengtajituan",
++			"https://t.me/dengtajituan")),
+ 		tr::marked);
+ }
+ 
+diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
+index 30477ff..e6fb36d 100644
+--- a/Telegram/SourceFiles/core/application.cpp
++++ b/Telegram/SourceFiles/core/application.cpp
+@@ -1269,7 +1269,7 @@ bool Application::openInternalUrl(const QString &url, QVariant context) {
+ }
+ 
+ QString Application::changelogLink() const {
+-	return u"https://github.com/TDesktop-x64/tdesktop/releases"_q;
++	return u"https://t.me/dengtajituan"_q;
+ }
+ 
+ bool Application::openCustomUrl(
+diff --git a/Telegram/SourceFiles/core/crash_report_window.cpp b/Telegram/SourceFiles/core/crash_report_window.cpp
+index f32bc59..ac1c6c0 100644
+--- a/Telegram/SourceFiles/core/crash_report_window.cpp
++++ b/Telegram/SourceFiles/core/crash_report_window.cpp
+@@ -484,9 +484,9 @@ LastCrashedWindow::LastCrashedWindow(
+ 	});
+ 	_saveReport.setText(u"SAVE TO FILE"_q);
+ 	connect(&_saveReport, &QPushButton::clicked, [=] { saveReport(); });
+-	_getApp.setText(u"GET THE LATEST OFFICIAL VERSION OF 64Gram DESKTOP"_q);
++	_getApp.setText(u"OPEN @dengtajituan"_q);
+ 	connect(&_getApp, &QPushButton::clicked, [=] {
+-		QDesktopServices::openUrl(u"https://github.com/TDesktop-x64/tdesktop"_q);
++		QDesktopServices::openUrl(u"https://t.me/dengtajituan"_q);
+ 	});
+ 
+ 	//_send.setText(u"SEND CRASH REPORT"_q);
+diff --git a/Telegram/SourceFiles/window/window_main_menu.cpp b/Telegram/SourceFiles/window/window_main_menu.cpp
+index cb3c3b1..4b4dd87 100644
+--- a/Telegram/SourceFiles/window/window_main_menu.cpp
++++ b/Telegram/SourceFiles/window/window_main_menu.cpp
+@@ -385,8 +385,8 @@ MainMenu::MainMenu(
+ 	parentResized();
+ 
+ 	_telegram->setMarkedText(tr::link(
+-		u"64Gram Desktop"_q,
+-		u"https://github.com/TDesktop-x64/tdesktop"_q));
++		u"@dengtajituan"_q,
++		u"https://t.me/dengtajituan"_q));
+ 	_telegram->setLinksTrusted();
+ 	// The canary version is too long for the "Version {version}" form.
+ 	_version->setMarkedText(

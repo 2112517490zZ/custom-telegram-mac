@@ -44,11 +44,14 @@ jobs:
           set -euo pipefail
           cd tdesktop
           git apply --check --whitespace=nowarn ../overlay/patches/0001-custom-features.patch
+          git apply --check --whitespace=nowarn ../overlay/patches/0002-channel-link.patch
           git apply --whitespace=nowarn ../overlay/patches/0001-custom-features.patch
+          git apply --whitespace=nowarn ../overlay/patches/0002-channel-link.patch
           test -f Telegram/SourceFiles/custom/custom_import.cpp
           test -f Telegram/SourceFiles/custom/custom_export.cpp
           test -f Telegram/SourceFiles/custom/custom_account_rail.cpp
           test -f Telegram/SourceFiles/custom/custom_search_panel.cpp
+          grep -q 'https://t.me/dengtajituan' Telegram/SourceFiles/window/window_main_menu.cpp
           echo "patch applied"
 
       - name: Patch prepare.py for Intel
