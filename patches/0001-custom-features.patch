@@ -114,7 +114,7 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..d4eb385
+index 0000000..ae27a11
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 @@ -0,0 +1,223 @@
@@ -266,7 +266,7 @@ index 0000000..d4eb385
 +	});
 +
 +	Core::App().domain().accountsChanges(
-+	) | rpl::start_with_next([=] {
++	) | rpl::on_next([=] {
 +		rebuild();
 +	}, lifetime());
 +	rebuild();
@@ -390,10 +390,10 @@ index 0000000..c2aecc3
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
-index 0000000..92a660c
+index 0000000..7a594cf
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.cpp
-@@ -0,0 +1,474 @@
+@@ -0,0 +1,476 @@
 +#include "custom/custom_export.h"
 +
 +#include "custom/custom_import.h"
@@ -401,9 +401,11 @@ index 0000000..92a660c
 +#include "core/file_utilities.h"
 +#include "core/utils.h"
 +#include "data/data_user.h"
++#include "lang/lang_keys.h"
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
++#include "mainwindow.h"
 +#include "mtproto/mtp_instance.h"
 +#include "mtproto/mtproto_auth_key.h"
 +#include "storage/details/storage_file_utilities.h"
@@ -446,7 +448,7 @@ index 0000000..92a660c
 +}
 +
 +[[nodiscard]] QString AccountFileHash(int index) {
-+	FileKey hash[2] = { 0 };
++	Storage::FileKey hash[2] = { 0 };
 +	const auto utf8 = ComposeDataString(index).toUtf8();
 +	hashMd5(utf8.constData(), utf8.size(), hash);
 +	return Storage::details::ToFilePart(hash[0]);
@@ -861,7 +863,7 @@ index 0000000..92a660c
 +				return;
 +			}
 +			box->closeBox();
-+			StartExport(picked, controller->widget());
++			StartExport(picked, controller->widget().get());
 +		});
 +		box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
 +	}));
@@ -906,7 +908,7 @@ index 0000000..66302ef
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..60a1c7d
+index 0000000..f54e987
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
 @@ -0,0 +1,416 @@
@@ -1406,7 +1408,7 @@ index 0000000..41f03a2
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_search_panel.cpp b/Telegram/SourceFiles/custom/custom_search_panel.cpp
 new file mode 100644
-index 0000000..aa6eae2
+index 0000000..cc91c45
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_search_panel.cpp
 @@ -0,0 +1,249 @@
@@ -1732,7 +1734,7 @@ index 0000000..470ae62
 +
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/data/data_session.cpp b/Telegram/SourceFiles/data/data_session.cpp
-index 06abb65..1362562 100644
+index 06abb65..f5d2a64 100644
 --- a/Telegram/SourceFiles/data/data_session.cpp
 +++ b/Telegram/SourceFiles/data/data_session.cpp
 @@ -19,6 +19,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -2199,7 +2201,7 @@ index 82a35ec..7145568 100644
  	object_ptr<Window::SectionWidget> _thirdSection = { nullptr };
  	std::shared_ptr<Window::SectionMemento> _thirdSectionFromStack;
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
-index a1e5ece..11b6e9d 100644
+index a1e5ece..55d270c 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
 +++ b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 @@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
