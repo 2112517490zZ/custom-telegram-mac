@@ -288,7 +288,9 @@ jobs:
       - name: Compile cache status
         run: |
           if [ "${{ steps.cache-ccache.outputs.cache-hit }}" = "true" ]; then
-            echo "::notice::ccache HIT"
+            echo "::notice::ccache exact HIT"
+          elif [ -d .ccache ] && [ -n "$(ls -A .ccache 2>/dev/null)" ]; then
+            echo "::notice::ccache restored from the previous compile"
           else
             echo "::notice::ccache MISS — cold compile"
           fi
@@ -324,7 +326,7 @@ jobs:
             -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
           LOG="$RUNNER_TEMP/telegram-build.log"
           touch "$LOG"
-          cmake --build ../out --config Debug --parallel >"$LOG" 2>&1 &
+          cmake --build ../out --config Debug --target Telegram --parallel >"$LOG" 2>&1 &
           pid=$!
           last=0
           still=0
@@ -351,7 +353,9 @@ jobs:
           code=$?
           set -e
           echo "telegram build exit $code bytes=$(wc -c <"$LOG" | tr -d ' ')"
-          tail -n 50 "$LOG" | cut -c1-200
+          echo "---- error lines ----"
+          grep -E "error:|fatal error:|BUILD FAILED" "$LOG" | cut -c1-500 | tail -n 40 || true
+          tail -n 30 "$LOG" | cut -c1-200
           ccache -s
           exit "$code"
 

@@ -1409,7 +1409,7 @@ new file mode 100644
 index 0000000..aa6eae2
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_search_panel.cpp
-@@ -0,0 +1,248 @@
+@@ -0,0 +1,249 @@
 +#include "custom/custom_search_panel.h"
 +
 +#include "apiwrap.h"
@@ -1572,7 +1572,8 @@ index 0000000..aa6eae2
 +		api.request(base::take(_requestId)).cancel();
 +	}
 +	using Flag = MTPmessages_SearchGlobal::Flag;
-+	auto flags = Flag::f_folder_id;
++	// Flag is an enum class. operator|= exists only on base::flags<Flag>.
++	auto flags = base::flags<Flag>(Flag::f_folder_id);
 +	if (_filter == Filter::User || _filter == Filter::Bot) {
 +		flags |= Flag::f_users_only;
 +	} else if (_filter == Filter::Group) {
