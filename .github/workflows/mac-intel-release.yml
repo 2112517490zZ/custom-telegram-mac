@@ -350,7 +350,7 @@ jobs:
           exit "$code"
 
       - name: Save compile cache
-        if: success() && steps.cache-ccache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.cache-ccache.outputs.cache-hit != 'true' }}
         continue-on-error: true
         uses: actions/cache/save@v4
         with:

@@ -582,7 +582,7 @@ index 0000000..92a660c
 +	}
 +	const auto user = account->session().user();
 +	out.phone = user->phone();
-+	const auto userId = QString::number(user->id().bare);
++	const auto userId = QString::number(peerToUser(user->id).bare);
 +	const auto stored = indexRoot.value(userId).toObject();
 +	if (out.phone.isEmpty()) {
 +		out.phone = stored.value("phone").toString();
@@ -599,7 +599,7 @@ index 0000000..92a660c
 +	out.json.insert("phone", out.phone.isEmpty() ? out.folderName : out.phone);
 +	out.json.insert("app_id", 2040);
 +	out.json.insert("app_hash", QString("b18441a1ff607e10a989891a5462e627"));
-+	out.json.insert("user_id", QString::number(user->id().bare));
++	out.json.insert("user_id", QString::number(peerToUser(user->id).bare));
 +	out.json.insert("username", user->username());
 +	out.json.insert("first_name", user->firstName);
 +	out.json.insert("last_name", user->lastName);
@@ -757,7 +757,7 @@ index 0000000..92a660c
 +			continue;
 +		}
 +		removeIds.push_back(QString::number(
-+			account->session().user()->id().bare));
++			peerToUser(account->session().user()->id).bare));
 +		prepared.push_back(std::move(one));
 +	}
 +	if (prepared.empty()) {
@@ -1254,7 +1254,7 @@ index 0000000..60a1c7d
 +	const auto name = user->name();
 +	const auto phone = user->phone();
 +	const auto username = user->username();
-+	const auto id = QString::number(user->id().bare);
++	const auto id = QString::number(peerToUser(user->id).bare);
 +	if (name.contains(q, Qt::CaseInsensitive)
 +		|| username.contains(q, Qt::CaseInsensitive)
 +		|| phone.contains(q, Qt::CaseInsensitive)
