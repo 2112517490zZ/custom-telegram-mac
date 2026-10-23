@@ -732,6 +732,7 @@ index 0000000..8083e51
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
++#include "core/core_settings.h"
 +#include "settings.h"
 +#include "styles/style_boxes.h"
 +#include "styles/style_layers.h"
