@@ -2506,10 +2506,11 @@ index a1e5ece..a726f49 100644
  #include "ui/unread_badge_paint.h"
  #include "ui/ui_utility.h"
  #include "core/application.h"
-@@ -55,6 +56,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -55,6 +56,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "main/main_account.h"
  #include "main/main_session.h"
  #include "main/main_domain.h"
++#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
  #include "mtproto/mtproto_dc_options.h"
  #include "window/window_session_controller.h"
