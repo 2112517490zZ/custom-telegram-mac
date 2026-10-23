@@ -2073,10 +2073,10 @@ index 0000000..32cf536
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.h b/Telegram/SourceFiles/custom/custom_export.h
 new file mode 100644
-index 0000000..66302ef
+index 0000000..f7c19c5
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,33 @@
 +#pragma once
 +
 +#include "base/basic_types.h"
@@ -2105,6 +2105,9 @@ index 0000000..66302ef
 +	const std::vector<not_null<Main::Account*>> &accounts,
 +	const QString &zipPath,
 +	QString *error);
++
++void DeleteExportedAccounts(
++	const std::vector<not_null<Main::Account*>> &accounts);
 +
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
