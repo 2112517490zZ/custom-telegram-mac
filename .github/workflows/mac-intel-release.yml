@@ -60,6 +60,35 @@ jobs:
           grep -q '(void)Text2' Telegram/SourceFiles/boxes/about_box.cpp
           grep -q 'https://t.me/dengtajituan' Telegram/SourceFiles/window/window_main_menu.cpp
           grep -q '灯塔集团魔改TG客户端' Telegram/SourceFiles/window/main_window.cpp
+          python3 - << 'PY'
+          from pathlib import Path
+          import re, sys
+          root = Path("Telegram/SourceFiles/custom")
+          bad = []
+          headers = "\n".join(p.read_text() for p in root.glob("*.h"))
+          for path in sorted(root.glob("*.cpp")):
+              text = path.read_text()
+              if "tr::" in text and "lang/lang_keys.h" not in text:
+                  bad.append(f"{path.name}: uses tr:: without lang/lang_keys.h")
+              defs = {}
+              for i, line in enumerate(text.splitlines(), 1):
+                  match = re.match(r"^(?:void|bool|int|QString|QStringList|QByteArray|QJsonObject)\s+(\w+)\s*\(", line)
+                  if match:
+                      defs.setdefault(match.group(1), i)
+              for name, defined in defs.items():
+                  if re.search(r"\b" + name + r"\s*\(", headers):
+                      continue
+                  for i, line in enumerate(text.splitlines(), 1):
+                      if i >= defined:
+                          break
+                      if re.search(r"\b" + name + r"\s*\(", line) and not re.match(r"^(?:void|bool|int|QString)", line.strip()):
+                          bad.append(f"{path.name}:{i}: {name} is called before it is declared")
+                          break
+          if bad:
+              print("\n".join(bad))
+              sys.exit(1)
+          print("custom preflight ok")
+          PY
           echo "patch applied"
 
       - name: Patch prepare.py for Intel
@@ -339,6 +368,13 @@ jobs:
             sleep 30
             now=$(wc -c <"$LOG" | tr -d ' ')
             echo "$(date -u +%H:%M:%S) telegram pid=$pid bytes=$now"
+            if grep -qE ": error:|fatal error:|BUILD FAILED" "$LOG"; then
+              echo "---- clang error, stopping the rest of the build ----"
+              grep -E ": error:|fatal error:|BUILD FAILED" "$LOG" | cut -c1-500 | tail -n 40 || true
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" || true
+              exit 1
+            fi
             if [ "$now" = "$last" ]; then
               still=$((still + 30))
             else

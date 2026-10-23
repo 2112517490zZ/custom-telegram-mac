@@ -392,10 +392,10 @@ index 0000000..c2aecc3
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
-index 0000000..194d9ed
+index 0000000..0000000
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.cpp
-@@ -0,0 +1,494 @@
+@@ -0,0 +1,498 @@
 +#include "custom/custom_export.h"
 +
 +#include "custom/custom_control.h"
@@ -438,6 +438,10 @@ index 0000000..194d9ed
 +#include <sqlite3.h>
 +
 +namespace Custom {
++
++void DeleteExportedAccounts(
++	const std::vector<not_null<Main::Account*>> &accounts);
++
 +namespace {
 +
 +constexpr auto kTemplateHash = "D877F783D5D3EF8C";
@@ -2848,14 +2852,15 @@ index e3d187f..53341a5 100644
  	[[nodiscard]] rpl::producer<FilterId> activeChatsFilter() const;
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..63f7754
+index 0000000..0000000
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,248 @@
 +#include "custom/custom_control.h"
 +
 +#include "core/application.h"
 +#include "core/enhanced_settings.h"
++#include "lang/lang_keys.h"
 +#include "main/main_domain.h"
 +#include "settings.h"
 +#include "styles/style_boxes.h"
