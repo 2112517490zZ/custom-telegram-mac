@@ -710,7 +710,7 @@ index 0000000..bca51c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..61f1669
+index 0000000..8083e51
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
 @@ -0,0 +1,780 @@
@@ -882,7 +882,7 @@ index 0000000..61f1669
 +        send_text(token, admin, (result or {}).get("text") or "导出没有回应。")
 +    elif data == "export_delete":
 +        save_chat({"mode": "export_delete"})
-+        send_text(token, admin, "回复 all 导出并移除全部，或回复手机号，多个用空格隔开。发出去之后这些号会从客户端删除。")
++        send_text(token, admin, "回复 all 导出并移除全部，或回复手机号，多个用空格隔开。发出去之后只从本机列表拿掉，不退出登录，包可以再导入。")
 +    elif data == "export_ask":
 +        save_chat({"mode": "export"})
 +        send_text(token, admin, "回复 all 导出全部，或回复手机号，多个用空格隔开。号会留在客户端。")
@@ -1524,10 +1524,10 @@ index 0000000..b7eeec0
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
-index 0000000..32cf536
+index 0000000..a7ee934
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.cpp
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,546 @@
 +#include "custom/custom_export.h"
 +
 +#include "custom/custom_control.h"
@@ -1880,7 +1880,7 @@ index 0000000..32cf536
 +
 +void ShowExportResult(int n, const QString &error) {
 +	Ui::Toast::Show(n > 0
-+		? QString::fromUtf8("已导出 %1 个帐号，并已从客户端删除").arg(n)
++		? QString::fromUtf8("已导出 %1 个帐号，已从列表移除。登录还在，这个包可以再导入。").arg(n)
 +		: QString::fromUtf8("导出失败: %1").arg(
 +			error.isEmpty() ? QString("empty") : error));
 +}
@@ -1986,11 +1986,13 @@ index 0000000..32cf536
 +		}
 +	}
 +	RemoveIndexKeys(removeIds);
++	// Drop the account from this client only. logout() tells the server to
++	// kill the session, which makes the exported tdata useless on reimport.
 +	for (const auto account : deleting) {
-+		Core::App().logoutWithChecks(account);
++		account->forcedLogOut();
 +	}
 +	if (active) {
-+		Core::App().logoutWithChecks(active);
++		active->forcedLogOut();
 +	}
 +}
 +
@@ -2022,7 +2024,8 @@ index 0000000..32cf536
 +		box->addRow(object_ptr<Ui::FlatLabel>(
 +			box,
 +			rpl::single(QString::fromUtf8(
-+				"打包后由机器人发给管理员。发出去才从客户端删除，发送失败号还在。")),
++				"打包后由机器人发给你。发出去才从本机列表移除，不退出登录。"
++				"发送失败号还在。这个包以后可以再导入。")),
 +			st::boxLabel));
 +		const auto search = box->addRow(object_ptr<Ui::InputField>(
 +			box,
