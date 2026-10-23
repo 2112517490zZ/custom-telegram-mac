@@ -3245,19 +3245,20 @@ index b3e4c28..6a31ba4 100644
  		const auto globalPosition = mapToGlobal(e->pos());
  		const auto thread = _suggestions
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
-index efd667d..41367a2 100644
+index efd667d..eed245b 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
 +++ b/Telegram/SourceFiles/main/main_domain.cpp
-@@ -13,6 +13,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -13,6 +13,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "core/crash_reports.h"
  #include "main/main_account.h"
  #include "main/main_session.h"
++#include "main/main_session_settings.h"
 +#include "api/api_updates.h"
 +#include "data/data_auto_download.h"
  #include "data/data_session.h"
  #include "data/data_changes.h"
  #include "data/data_user.h"
-@@ -20,8 +22,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -20,8 +23,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "mtproto/mtproto_dc_options.h"
  #include "storage/storage_domain.h"
  #include "storage/storage_account.h"
@@ -3271,7 +3272,7 @@ index efd667d..41367a2 100644
  #include "window/notifications_manager.h"
  #include "window/window_controller.h"
  #include "data/data_peer_values.h" // Data::AmPremiumValue.
-@@ -69,7 +76,10 @@ Storage::StartResult Domain::start(const QByteArray &passcode) {
+@@ -69,7 +77,10 @@ Storage::StartResult Domain::start(const QByteArray &passcode) {
  	const auto result = _local->start(passcode);
  	if (result == Storage::StartResult::Success) {
  		activateAfterStarting();
@@ -3283,7 +3284,7 @@ index efd667d..41367a2 100644
  	} else {
  		Assert(!started());
  	}
-@@ -315,6 +325,56 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+@@ -315,6 +326,56 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
  	return account;
  }
  
@@ -3340,7 +3341,7 @@ index efd667d..41367a2 100644
  void Domain::addActivated(MTP::Environment environment, bool newWindow) {
  	const auto added = [&](not_null<Main::Account*> account) {
  		if (newWindow) {
-@@ -344,6 +404,10 @@ void Domain::watchSession(not_null<Account*> account) {
+@@ -344,6 +405,10 @@ void Domain::watchSession(not_null<Account*> account) {
  	) | rpl::filter([=](Session *session) {
  		return session != nullptr;
  	}) | rpl::on_next([=](Session *session) {
@@ -3351,7 +3352,7 @@ index efd667d..41367a2 100644
  		session->data().unreadBadgeChanges(
  		) | rpl::on_next([=] {
  			scheduleUpdateUnreadBadge();
-@@ -516,14 +580,15 @@ void Domain::scheduleWriteAccounts() {
+@@ -516,14 +581,15 @@ void Domain::scheduleWriteAccounts() {
  }
  
  int Domain::maxAccounts() const {
