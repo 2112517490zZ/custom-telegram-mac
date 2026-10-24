@@ -64,7 +64,7 @@ index 19003b6..b08fafb 100644
  	if (isOnline != _lastWasOnline
  		|| (isOnline && _lastSetOnline + config.onlineUpdatePeriod <= ms)
 diff --git a/Telegram/SourceFiles/chat_helpers/tabbed_panel.cpp b/Telegram/SourceFiles/chat_helpers/tabbed_panel.cpp
-index 30c19ed..bba291d 100644
+index 30c19ed..4e8ecab 100644
 --- a/Telegram/SourceFiles/chat_helpers/tabbed_panel.cpp
 +++ b/Telegram/SourceFiles/chat_helpers/tabbed_panel.cpp
 @@ -7,6 +7,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -115,12 +115,15 @@ index 30c19ed..bba291d 100644
  
  	update();
  }
-@@ -487,7 +499,39 @@ void TabbedPanel::showStarted() {
+@@ -487,7 +499,42 @@ void TabbedPanel::showStarted() {
  	}
  }
  
 +void TabbedPanel::applyInnerWidth(int width) {
-+	width = std::clamp(width, 280, 640);
++	width = std::clamp(
++		width,
++		Custom::kMinEmojiPanelWidth,
++		Custom::kMaxEmojiPanelWidth);
 +	const auto height = _contentHeight > 0 ? _contentHeight : st::emojiPanMaxHeight;
 +	resize(QRect(0, 0, width, height).marginsAdded(innerPadding()).size());
 +	_selector->resize(width, height);
@@ -710,10 +713,10 @@ index 0000000..bca51c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..1111111
+index 0000000..ea33098
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,781 @@
+@@ -0,0 +1,787 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1373,27 +1376,33 @@ index 0000000..1111111
 +} // namespace
 +
 +int SearchPanelWidth() {
-+	return CachedWidth("search", 320, 220, 640);
++	return CachedWidth("search", 320, kMinSearchPanelWidth, kMaxSearchPanelWidth);
 +}
 +
 +void SetSearchPanelWidth(int width) {
-+	SaveLayoutKey("search", std::clamp(width, 220, 640));
++	SaveLayoutKey(
++		"search",
++		std::clamp(width, kMinSearchPanelWidth, kMaxSearchPanelWidth));
 +}
 +
 +int FiltersColumnWidth() {
-+	return CachedWidth("filters", 90, 68, 240);
++	return CachedWidth("filters", 90, kMinFiltersColumnWidth, kMaxFiltersColumnWidth);
 +}
 +
 +void SetFiltersColumnWidth(int width) {
-+	SaveLayoutKey("filters", std::clamp(width, 68, 240));
++	SaveLayoutKey(
++		"filters",
++		std::clamp(width, kMinFiltersColumnWidth, kMaxFiltersColumnWidth));
 +}
 +
 +int EmojiPanelWidth() {
-+	return CachedWidth("emoji", 360, 280, 640);
++	return CachedWidth("emoji", 360, kMinEmojiPanelWidth, kMaxEmojiPanelWidth);
 +}
 +
 +void SetEmojiPanelWidth(int width) {
-+	SaveLayoutKey("emoji", std::clamp(width, 280, 640));
++	SaveLayoutKey(
++		"emoji",
++		std::clamp(width, kMinEmojiPanelWidth, kMaxEmojiPanelWidth));
 +}
 +
 +void StartBotIfEnabled() {
@@ -1497,10 +1506,10 @@ index 0000000..1111111
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..b7eeec0
+index 0000000..6b888b3
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,31 @@
 +#pragma once
 +
 +namespace Window {
@@ -1514,6 +1523,15 @@ index 0000000..b7eeec0
 +void StartBotIfEnabled();
 +
 +[[nodiscard]] bool SendExportViaBot(const QString &zipPath, QString *error);
++
++inline constexpr int kMinDialogsColumnWidth = 80;
++inline constexpr int kMinChatColumnWidth = 120;
++inline constexpr int kMinFiltersColumnWidth = 40;
++inline constexpr int kMaxFiltersColumnWidth = 800;
++inline constexpr int kMinSearchPanelWidth = 160;
++inline constexpr int kMaxSearchPanelWidth = 1200;
++inline constexpr int kMinEmojiPanelWidth = 160;
++inline constexpr int kMaxEmojiPanelWidth = 1200;
 +
 +[[nodiscard]] int SearchPanelWidth();
 +void SetSearchPanelWidth(int width);
@@ -3251,6 +3269,61 @@ index b3e4c28..6a31ba4 100644
  	if (_scroll->geometry().contains(e->pos())) {
  		const auto globalPosition = mapToGlobal(e->pos());
  		const auto thread = _suggestions
+diff --git a/Telegram/SourceFiles/intro/intro_widget.cpp b/Telegram/SourceFiles/intro/intro_widget.cpp
+index f188e0c..616c8f2 100644
+--- a/Telegram/SourceFiles/intro/intro_widget.cpp
++++ b/Telegram/SourceFiles/intro/intro_widget.cpp
+@@ -148,7 +148,12 @@ Widget::Widget(
+ 
+ 	_back->entity()->setClickedCallback([=] { backRequested(); });
+ 	_back->entity()->setAccessibleName(tr::lng_go_back(tr::now));
+-	_back->hide(anim::type::instant);
++	if (accountBeforeIntro
++		|| Core::App().domain().maybeLastOrSomeAuthedAccount()) {
++		_back->show(anim::type::instant);
++	} else {
++		_back->hide(anim::type::instant);
++	}
+ 
+ 	if (_changeLanguage) {
+ 		_changeLanguage->finishAnimating();
+@@ -417,7 +422,11 @@ void Widget::historyMove(StackAction action, Animate animate) {
+ 	if (action == StackAction::Back || action == StackAction::Replace) {
+ 		delete base::take(wasStep);
+ 	}
+-	_back->toggle(getStep()->hasBack(), anim::type::normal);
++	_back->toggle(
++		getStep()->hasBack()
++			|| getData()->accountBeforeIntro.get()
++			|| Core::App().domain().maybeLastOrSomeAuthedAccount(),
++		anim::type::normal);
+ 
+ 	auto stepHasCover = getStep()->hasCover();
+ 	_settings->toggle(!stepHasCover, anim::type::normal);
+@@ -728,7 +737,11 @@ void Widget::showControls() {
+ 	if (_terms) {
+ 		_terms->show(anim::type::instant);
+ 	}
+-	_back->toggle(getStep()->hasBack(), anim::type::instant);
++	_back->toggle(
++		getStep()->hasBack()
++			|| getData()->accountBeforeIntro.get()
++			|| Core::App().domain().maybeLastOrSomeAuthedAccount(),
++		anim::type::instant);
+ }
+ 
+ void Widget::setupNextButton() {
+@@ -881,7 +894,9 @@ void Widget::keyPressEvent(QKeyEvent *e) {
+ 	if (_showAnimation || getStep()->animating()) return;
+ 
+ 	if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back) {
+-		if (getStep()->hasBack()) {
++		if (getStep()->hasBack()
++			|| getData()->accountBeforeIntro.get()
++			|| Core::App().domain().maybeLastOrSomeAuthedAccount()) {
+ 			backRequested();
+ 		}
+ 	} else if (e->key() == Qt::Key_Enter
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
 index efd667d..eed245b 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
@@ -3415,7 +3488,7 @@ index eef6d0e..30ee6ef 100644
  	void activate(not_null<Main::Account*> account);
  	void addActivated(MTP::Environment environment, bool newWindow = false);
 diff --git a/Telegram/SourceFiles/mainwidget.cpp b/Telegram/SourceFiles/mainwidget.cpp
-index baf29c7..9d5a2b7 100644
+index baf29c7..65705a7 100644
 --- a/Telegram/SourceFiles/mainwidget.cpp
 +++ b/Telegram/SourceFiles/mainwidget.cpp
 @@ -29,6 +29,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -3595,13 +3668,14 @@ index baf29c7..9d5a2b7 100644
  				thirdSectionTop,
  				thirdSectionWidth,
  				height() - thirdSectionTop);
-@@ -2760,49 +2841,51 @@ void MainWidget::updateControlsGeometry() {
+@@ -2760,49 +2841,52 @@ void MainWidget::updateControlsGeometry() {
  		if (_dialogs) {
  			accumulate_min(
  				dialogsWidth,
 -				width() - st::columnMinimalWidthMain);
 -			_dialogs->setGeometryToLeft(0, 0, dialogsWidth, height());
-+				width() - st::columnMinimalWidthMain - searchWidth - railWidth);
++				width() - Custom::kMinChatColumnWidth - searchWidth - railWidth);
++			accumulate_max(dialogsWidth, Custom::kMinDialogsColumnWidth);
 +			_dialogs->setGeometryToLeft(railWidth, 0, dialogsWidth, height());
  		}
  		if (_sideShadow) {
@@ -3657,7 +3731,7 @@ index baf29c7..9d5a2b7 100644
  				0,
  				mainSectionWidth,
  				height());
-@@ -2818,6 +2901,7 @@ void MainWidget::updateControlsGeometry() {
+@@ -2818,6 +2902,7 @@ void MainWidget::updateControlsGeometry() {
  			mainSectionGeometry,
  			_contentScrollAddToY);
  	}
@@ -3665,7 +3739,7 @@ index baf29c7..9d5a2b7 100644
  	refreshResizeAreas();
  	if (_player) {
  		_player->entity()->updateDropdownsGeometry();
-@@ -2859,6 +2943,24 @@ void MainWidget::refreshResizeAreas() {
+@@ -2859,6 +2944,24 @@ void MainWidget::refreshResizeAreas() {
  	} else if (_thirdColumnResizeArea) {
  		_thirdColumnResizeArea.destroy();
  	}
@@ -3690,7 +3764,25 @@ index baf29c7..9d5a2b7 100644
  }
  
  template <typename MoveCallback, typename FinishCallback>
-@@ -2931,6 +3033,77 @@ void MainWidget::ensureThirdColumnResizeAreaCreated() {
+@@ -2883,7 +2986,7 @@ void MainWidget::ensureFirstColumnResizeAreaCreated() {
+ 	}
+ 	auto moveLeftCallback = [=](int globalLeft) {
+ 		const auto newWidth = globalLeft - mapToGlobal(QPoint(0, 0)).x();
+-		const auto newRatio = (newWidth < st::columnMinimalWidthLeft / 2)
++		const auto newRatio = (newWidth < Custom::kMinDialogsColumnWidth / 2)
+ 			? 0.
+ 			: float64(newWidth) / width();
+ 		const auto nochat = !_controller->mainSectionShown();
+@@ -2921,7 +3024,7 @@ void MainWidget::ensureThirdColumnResizeAreaCreated() {
+ 		}
+ 		Core::App().settings().setThirdColumnWidth(std::clamp(
+ 			Core::App().settings().thirdColumnWidth(),
+-			st::columnMinimalWidthThird,
++			Custom::kMinChatColumnWidth,
+ 			st::columnMaximalWidthThird));
+ 		Core::App().saveSettingsDelayed();
+ 	};
+@@ -2931,6 +3034,77 @@ void MainWidget::ensureThirdColumnResizeAreaCreated() {
  		std::move(moveFinishedCallback));
  }
  
@@ -3768,7 +3860,25 @@ index baf29c7..9d5a2b7 100644
  void MainWidget::updateDialogsWidthAnimated() {
  	const auto nochat = !_controller->mainSectionShown();
  	if (!_dialogs || Core::App().settings().dialogsWidthRatio(nochat) > 0) {
-@@ -3259,6 +3432,26 @@ bool MainWidget::animatingShow() const {
+@@ -3169,12 +3343,14 @@ void MainWidget::updateWindowAdaptiveLayout() {
+ 		//	&& chatWidth >= _history->minimalWidthForTabbedSelectorSection()) {
+ 		//	chatWidth -= _history->tabbedSelectorSectionWidth();
+ 		//}
+-		auto minimalNormalWidth = st::columnMinimalWidthLeft
+-			+ st::columnMinimalWidthMain;
++		auto minimalNormalWidth = Custom::kMinDialogsColumnWidth
++			+ Custom::kMinChatColumnWidth;
+ 		if (chatWidth >= minimalNormalWidth) {
+ 			// Switch layout back to normal in a wide enough window.
+ 			layout.windowLayout = Window::Adaptive::WindowLayout::Normal;
+-			layout.dialogsWidth = st::columnMinimalWidthLeft;
++			layout.dialogsWidth = std::max(
++				layout.dialogsWidth,
++				Custom::kMinDialogsColumnWidth);
+ 			layout.chatWidth = layout.bodyWidth - layout.dialogsWidth;
+ 			dialogsWidthRatio = float64(layout.dialogsWidth) / layout.bodyWidth;
+ 		}
+@@ -3259,6 +3435,32 @@ bool MainWidget::animatingShow() const {
  	return _showAnimation != nullptr;
  }
  
@@ -3792,11 +3902,24 @@ index baf29c7..9d5a2b7 100644
 +	_accountRail->raise();
 +}
 +
++void MainWidget::hideAccountRail() {
++	if (_accountRail) {
++		_accountRail->hide();
++	}
++}
++
  bool MainWidget::isOneColumn() const {
  	return _controller->adaptive().isOneColumn();
  }
+@@ -3280,4 +3482,4 @@ MainWidget *main() {
+ 	return nullptr;
+ }
+ 
+-} // namespace App
+\ No newline at end of file
++} // namespace App
 diff --git a/Telegram/SourceFiles/mainwidget.h b/Telegram/SourceFiles/mainwidget.h
-index 82a35ec..785c4bf 100644
+index 82a35ec..876719e 100644
 --- a/Telegram/SourceFiles/mainwidget.h
 +++ b/Telegram/SourceFiles/mainwidget.h
 @@ -72,6 +72,11 @@ template <typename Widget>
@@ -3811,16 +3934,17 @@ index 82a35ec..785c4bf 100644
  namespace Window {
  class SessionController;
  template <typename Inner>
-@@ -132,6 +137,8 @@ public:
+@@ -132,6 +137,9 @@ public:
  	void handleStartFiles(QStringList paths);
  
  	void windowShown();
 +	[[nodiscard]] int accountRailWidth() const;
 +	void placeAccountRail(int height);
++	void hideAccountRail();
  
  	void dialogsToUp();
  	void checkActivation();
-@@ -233,6 +240,8 @@ public:
+@@ -233,6 +241,8 @@ public:
  private:
  	void paintEvent(QPaintEvent *e) override;
  	void resizeEvent(QResizeEvent *e) override;
@@ -3829,7 +3953,7 @@ index 82a35ec..785c4bf 100644
  	bool eventFilter(QObject *o, QEvent *e) override;
  
  	[[nodiscard]] bool relevantForDialogsFocus(
-@@ -321,6 +330,9 @@ private:
+@@ -321,6 +331,9 @@ private:
  		FinishCallback &&finishCallback);
  	void ensureFirstColumnResizeAreaCreated();
  	void ensureThirdColumnResizeAreaCreated();
@@ -3839,7 +3963,7 @@ index 82a35ec..785c4bf 100644
  
  	bool isReadyChatBackground(
  		const Data::WallPaper &background,
-@@ -347,8 +359,10 @@ private:
+@@ -347,8 +360,10 @@ private:
  	int _thirdColumnWidth = 0;
  	Ui::Animations::Simple _a_dialogsWidth;
  
@@ -3850,7 +3974,7 @@ index 82a35ec..785c4bf 100644
  	object_ptr<Window::SectionWidget> _mainSection = { nullptr };
  	object_ptr<Window::SectionWidget> _thirdSection = { nullptr };
  	std::shared_ptr<Window::SectionMemento> _thirdSectionFromStack;
-@@ -358,6 +372,9 @@ private:
+@@ -358,6 +373,9 @@ private:
  	object_ptr<Ui::PlainShadow> _thirdShadow = { nullptr };
  	object_ptr<Ui::ResizeArea> _firstColumnResizeArea = { nullptr };
  	object_ptr<Ui::ResizeArea> _thirdColumnResizeArea = { nullptr };
@@ -3860,11 +3984,42 @@ index 82a35ec..785c4bf 100644
  
  	base::weak_ptr<Calls::Call> _currentCall;
  	base::weak_ptr<Calls::GroupCall> _currentGroupCall;
+@@ -391,4 +409,4 @@ private:
+ 
+ namespace App {
+ MainWidget *main();
+-} // namespace App
+\ No newline at end of file
++} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..7443b4c 100644
+index 8acc224..839b04f 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
-@@ -750,6 +750,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -282,6 +282,9 @@ void MainWindow::setupIntro(
+ 		QPixmap oldContentCache) {
+ 	auto animated = (_main || _passcodeLock || _setupEmailLock);
+ 
++	if (_main) {
++		_main->hideAccountRail();
++	}
+ 	destroyLayer();
+ 	auto created = object_ptr<Intro::Widget>(
+ 		bodyWidget(),
+@@ -724,6 +727,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+ 		e->accept();
+ 		return;
+ 	}
++	if (_intro) {
++		if (const auto back = Core::App().domain().maybeLastOrSomeAuthedAccount()) {
++			e->ignore();
++			Core::App().domain().activate(back);
++			return;
++		}
++	}
+ 	e->ignore();
+ 	const auto hasAuth = [&] {
+ 		if (!Core::App().domain().started()) {
+@@ -750,6 +760,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -3881,6 +4036,13 @@ index 8acc224..7443b4c 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
+@@ -791,4 +811,4 @@ MainWindow *wnd() {
+ 		: nullptr;
+ }
+ 
+-} // namespace App
+\ No newline at end of file
++} // namespace App
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 index a1e5ece..b38c2b2 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
@@ -4180,7 +4342,7 @@ index 541acb3..5eb4c21 100644
  	Ui::SideBarButton _menu;
  	Ui::ScrollArea _scroll;
 diff --git a/Telegram/SourceFiles/window/window_session_controller.cpp b/Telegram/SourceFiles/window/window_session_controller.cpp
-index a008ad7..57eadfb 100644
+index a008ad7..45d8865 100644
 --- a/Telegram/SourceFiles/window/window_session_controller.cpp
 +++ b/Telegram/SourceFiles/window/window_session_controller.cpp
 @@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4226,7 +4388,87 @@ index a008ad7..57eadfb 100644
  		if (!session().supportMode()) {
  			return;
  		}
-@@ -3316,7 +3345,13 @@ not_null<MainWidget*> SessionController::content() const {
+@@ -2646,9 +2675,9 @@ int SessionController::dialogsSmallColumnWidth() const {
+ }
+ 
+ int SessionController::minimalThreeColumnWidth() const {
+-	return (_hasDialogs ? st::columnMinimalWidthLeft : 0)
+-		+ st::columnMinimalWidthMain
+-		+ st::columnMinimalWidthThird;
++	return (_hasDialogs ? Custom::kMinDialogsColumnWidth : 0)
++		+ Custom::kMinChatColumnWidth
++		+ Custom::kMinChatColumnWidth;
+ }
+ 
+ auto SessionController::computeColumnLayout() const -> ColumnLayout {
+@@ -2658,8 +2687,8 @@ auto SessionController::computeColumnLayout() const -> ColumnLayout {
+ 	auto dialogsWidth = 0, chatWidth = 0, thirdWidth = 0;
+ 
+ 	auto useOneColumnLayout = [&] {
+-		auto minimalNormal = st::columnMinimalWidthLeft
+-			+ st::columnMinimalWidthMain;
++		auto minimalNormal = Custom::kMinDialogsColumnWidth
++			+ Custom::kMinChatColumnWidth;
+ 		if (_hasDialogs && bodyWidth < minimalNormal) {
+ 			return true;
+ 		}
+@@ -2683,7 +2712,7 @@ auto SessionController::computeColumnLayout() const -> ColumnLayout {
+ 	} else if (useNormalLayout()) {
+ 		layout = Adaptive::WindowLayout::Normal;
+ 		dialogsWidth = countDialogsWidthFromRatio(bodyWidth);
+-		accumulate_min(dialogsWidth, bodyWidth - st::columnMinimalWidthMain);
++		accumulate_min(dialogsWidth, bodyWidth - Custom::kMinChatColumnWidth);
+ 		chatWidth = bodyWidth - dialogsWidth;
+ 	} else {
+ 		layout = Adaptive::WindowLayout::ThreeColumn;
+@@ -2709,14 +2738,13 @@ int SessionController::countDialogsWidthFromRatio(int bodyWidth) const {
+ 	const auto width = bodyWidth
+ 		* Core::App().settings().dialogsWidthRatio(nochat);
+ 	auto result = int(base::SafeRound(width));
+-	accumulate_max(result, st::columnMinimalWidthLeft);
+-//	accumulate_min(result, st::columnMaximalWidthLeft);
++	accumulate_max(result, Custom::kMinDialogsColumnWidth);
+ 	return result;
+ }
+ 
+ int SessionController::countThirdColumnWidthFromRatio(int bodyWidth) const {
+ 	auto result = Core::App().settings().thirdColumnWidth();
+-	accumulate_max(result, st::columnMinimalWidthThird);
++	accumulate_max(result, Custom::kMinChatColumnWidth);
+ 	accumulate_min(result, st::columnMaximalWidthThird);
+ 	return result;
+ }
+@@ -2725,7 +2753,7 @@ SessionController::ShrinkResult SessionController::shrinkDialogsAndThirdColumns(
+ 		int dialogsWidth,
+ 		int thirdWidth,
+ 		int bodyWidth) const {
+-	auto chatWidth = st::columnMinimalWidthMain;
++	auto chatWidth = Custom::kMinChatColumnWidth;
+ 	if (dialogsWidth + thirdWidth + chatWidth <= bodyWidth) {
+ 		return { dialogsWidth, thirdWidth };
+ 	}
+@@ -2733,14 +2761,14 @@ SessionController::ShrinkResult SessionController::shrinkDialogsAndThirdColumns(
+ 		/ (dialogsWidth + thirdWidth);
+ 	auto dialogsWidthNew = ((bodyWidth - chatWidth) * dialogsWidth)
+ 		/ (dialogsWidth + thirdWidth);
+-	if (thirdWidthNew < st::columnMinimalWidthThird) {
+-		thirdWidthNew = st::columnMinimalWidthThird;
++	if (thirdWidthNew < Custom::kMinChatColumnWidth) {
++		thirdWidthNew = Custom::kMinChatColumnWidth;
+ 		dialogsWidthNew = bodyWidth - thirdWidthNew - chatWidth;
+-		Assert(!_hasDialogs || dialogsWidthNew >= st::columnMinimalWidthLeft);
+-	} else if (_hasDialogs && dialogsWidthNew < st::columnMinimalWidthLeft) {
+-		dialogsWidthNew = st::columnMinimalWidthLeft;
++		Assert(!_hasDialogs || dialogsWidthNew >= Custom::kMinDialogsColumnWidth);
++	} else if (_hasDialogs && dialogsWidthNew < Custom::kMinDialogsColumnWidth) {
++		dialogsWidthNew = Custom::kMinDialogsColumnWidth;
+ 		thirdWidthNew = bodyWidth - dialogsWidthNew - chatWidth;
+-		Assert(thirdWidthNew >= st::columnMinimalWidthThird);
++		Assert(thirdWidthNew >= Custom::kMinChatColumnWidth);
+ 	}
+ 	return { dialogsWidthNew, thirdWidthNew };
+ }
+@@ -3316,11 +3344,18 @@ not_null<MainWidget*> SessionController::content() const {
  }
  
  int SessionController::filtersWidth() const {
@@ -4241,6 +4483,12 @@ index a008ad7..57eadfb 100644
  }
  
  bool SessionController::enoughSpaceForFilters() const {
+-	return widget()->width() >= widget()->minimumWidth() + st::windowFiltersWidth;
++	return widget()->width()
++		>= widget()->minimumWidth() + Custom::kMinFiltersColumnWidth;
+ }
+ 
+ rpl::producer<bool> SessionController::enoughSpaceForFiltersValue() const {
 diff --git a/Telegram/SourceFiles/window/window_session_controller.h b/Telegram/SourceFiles/window/window_session_controller.h
 index e3d187f..53341a5 100644
 --- a/Telegram/SourceFiles/window/window_session_controller.h
