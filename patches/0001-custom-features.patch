@@ -741,7 +741,7 @@ index 0000000..cc56bde
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..70aaec3
+index 0000000..97ff7a8
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
 @@ -0,0 +1,930 @@
@@ -1471,7 +1471,7 @@ index 0000000..70aaec3
 +			return;
 +		}
 +		const auto current = &domain.active();
-+		auto *main = dynamic_cast<MainWindow*>(&window->widget());
++		auto *main = window->widget().get();
 +		if (current->sessionExists() && main && main->sessionContent()) {
 +			const auto added = domain.add(MTP::Environment{});
 +			if (main->showAddAccountOverlay(added)) {
@@ -3479,7 +3479,7 @@ index b3e4c28..6a31ba4 100644
  		const auto globalPosition = mapToGlobal(e->pos());
  		const auto thread = _suggestions
 diff --git a/Telegram/SourceFiles/intro/intro_widget.cpp b/Telegram/SourceFiles/intro/intro_widget.cpp
-index f188e0c..a95edd1 100644
+index f188e0c..91bcdff 100644
 --- a/Telegram/SourceFiles/intro/intro_widget.cpp
 +++ b/Telegram/SourceFiles/intro/intro_widget.cpp
 @@ -148,7 +148,12 @@ Widget::Widget(
@@ -3533,12 +3533,11 @@ index f188e0c..a95edd1 100644
  			backRequested();
  		}
  	} else if (e->key() == Qt::Key_Enter
-@@ -895,6 +910,23 @@ void Widget::backRequested() {
+@@ -895,6 +910,22 @@ void Widget::backRequested() {
  	const auto back = getData()->accountBeforeIntro.get();
  	if (_stepHistory.size() > 1) {
  		historyMove(StackAction::Back, Animate::Back);
-+	} else if (const auto window = dynamic_cast<MainWindow*>(
-+			&getData()->controller->widget())) {
++	} else if (const auto window = getData()->controller->widget().get()) {
 +		if (window->restoreMainFromIntro()) {
 +			return;
 +		}
