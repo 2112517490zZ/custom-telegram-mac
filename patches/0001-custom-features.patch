@@ -255,14 +255,15 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..3a4db22
+index 0000000..6602c1e
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,409 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
 +#include "core/core_settings.h"
++#include "custom/custom_control.h"
 +#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
 +#include "data/data_session.h"
@@ -270,6 +271,7 @@ index 0000000..3a4db22
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
++#include "ui/ui_utility.h"
 +#include "window/window_session_controller.h"
 +
 +#include <array>
@@ -426,18 +428,35 @@ index 0000000..3a4db22
 +		rebuild();
 +	});
 +	connect(_import, &QPushButton::clicked, this, [=] {
-+		ChooseAndImportAccountPack(this, &controller->session().domain());
++		crl::on_main(this, [=] {
++			ChooseAndImportAccountPack(
++				Core::App().getFileDialogParent(),
++				&_controller->session().domain());
++		});
 +	});
 +	connect(_export, &QPushButton::clicked, this, [=] {
-+		ChooseAndExportAccounts(controller);
++		crl::on_main(this, [=] {
++			ChooseAndExportAccounts(_controller);
++		});
 +	});
 +	connect(_bounce, &QTimer::timeout, this, [=] { tickBounce(); });
 +
 +	Core::App().domain().accountsChanges(
 +	) | rpl::on_next([=] {
-+		rebuild();
++		scheduleRebuild();
 +	}, lifetime());
 +	rebuild();
++}
++
++void AccountRail::scheduleRebuild() {
++	if (_rebuildQueued) {
++		return;
++	}
++	_rebuildQueued = true;
++	crl::on_main(this, [=] {
++		_rebuildQueued = false;
++		rebuild();
++	});
 +}
 +
 +void AccountRail::noteUnread(not_null<Main::Account*> account) {
@@ -503,6 +522,11 @@ index 0000000..3a4db22
 +}
 +
 +void AccountRail::rebuild() {
++	if (_rebuilding) {
++		scheduleRebuild();
++		return;
++	}
++	_rebuilding = true;
 +	_badgeLifetime.destroy();
 +	_byAccount.clear();
 +	auto *inner = new QWidget;
@@ -546,6 +570,7 @@ index 0000000..3a4db22
 +	_inner = inner;
 +	_import->raise();
 +	_export->raise();
++	_rebuilding = false;
 +}
 +
 +bool AccountRail::eventFilter(QObject *watched, QEvent *event) {
@@ -645,10 +670,10 @@ index 0000000..3a4db22
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..bca51c5
+index 0000000..cc56bde
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,65 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
@@ -689,11 +714,14 @@ index 0000000..bca51c5
 +	void dropEvent(QDropEvent *e) override;
 +
 +	void rebuild();
++	void scheduleRebuild();
 +	void noteUnread(not_null<Main::Account*> account);
 +	void saveOrder();
 +	void tickBounce();
 +
 +	const not_null<Window::SessionController*> _controller;
++	bool _rebuilding = false;
++	bool _rebuildQueued = false;
 +	QLineEdit *_search = nullptr;
 +	QScrollArea *_scroll = nullptr;
 +	QWidget *_inner = nullptr;
@@ -713,10 +741,10 @@ index 0000000..bca51c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..ea33098
+index 0000000..70aaec3
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,787 @@
+@@ -0,0 +1,930 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -725,6 +753,7 @@ index 0000000..ea33098
 +#include "core/enhanced_settings.h"
 +#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
++#include "mainwindow.h"
 +#include "data/data_peer.h"
 +#include "data/data_peer_id.h"
 +#include "data/data_session.h"
@@ -736,14 +765,17 @@ index 0000000..ea33098
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
 +#include "core/core_settings.h"
++#include "mtproto/mtproto_dc_options.h"
 +#include "settings.h"
 +#include "styles/style_boxes.h"
 +#include "styles/style_layers.h"
 +#include "ui/layers/generic_box.h"
++#include "ui/ui_utility.h"
 +#include "ui/toast/toast.h"
 +#include "ui/widgets/checkbox.h"
 +#include "ui/widgets/fields/input_field.h"
 +#include "ui/widgets/labels.h"
++#include "window/window_controller.h"
 +#include "window/window_session_controller.h"
 +
 +#include <algorithm>
@@ -1419,6 +1451,145 @@ index 0000000..ea33098
 +	StartServe();
 +}
 +
++void StartAddAccount() {
++	if (!Core::App().domain().started()) {
++		return;
++	}
++	const auto window = Core::App().activePrimaryWindow();
++	if (!window) {
++		Core::App().domain().addActivated(MTP::Environment{});
++		return;
++	}
++	crl::on_main(window, [=] {
++		auto &domain = Core::App().domain();
++		if (!domain.started()) {
++			return;
++		}
++		if (int(domain.accounts().size()) >= domain.maxAccounts()) {
++			Ui::Toast::Show(QString::fromUtf8(
++				"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
++			return;
++		}
++		const auto current = &domain.active();
++		auto *main = dynamic_cast<MainWindow*>(&window->widget());
++		if (current->sessionExists() && main && main->sessionContent()) {
++			const auto added = domain.add(MTP::Environment{});
++			if (main->showAddAccountOverlay(added)) {
++				return;
++			}
++		}
++		domain.addActivated(MTP::Environment{});
++	});
++}
++
++QString FindBin(const QString &name) {
++	const auto paths = QStringList{
++		u"/usr/bin/"_q + name,
++		u"/bin/"_q + name,
++		u"/usr/local/bin/"_q + name,
++		name,
++	};
++	for (const auto &path : paths) {
++		if (path.contains('/')
++			&& QFileInfo::exists(path)
++			&& QFileInfo(path).isExecutable()) {
++			return path;
++		}
++	}
++	return name;
++}
++
++bool RunTool(
++		const QString &program,
++		const QStringList &args,
++		const QString &cwd,
++		int timeoutMs) {
++	QProcess proc;
++	proc.setProgram(program);
++	proc.setArguments(args);
++	if (!cwd.isEmpty()) {
++		proc.setWorkingDirectory(cwd);
++	}
++	proc.start();
++	if (!proc.waitForFinished(timeoutMs)) {
++		proc.kill();
++		proc.waitForFinished(3000);
++		return false;
++	}
++	return proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0;
++}
++
++bool ZipFolder(const QString &folder, const QString &zipPath) {
++	QFile::remove(zipPath);
++	const auto names = QDir(folder).entryList(
++		QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
++	if (names.isEmpty()) {
++		return false;
++	}
++	const auto timeout = 10 * 60 * 1000;
++	if (RunTool(
++			FindBin(u"zip"_q),
++			QStringList{ u"-qr"_q, zipPath } + names,
++			folder,
++			timeout)
++		&& QFile::exists(zipPath)) {
++		return true;
++	}
++	const auto ditto = FindBin(u"ditto"_q);
++	if (ditto.contains('/')
++		&& RunTool(
++			ditto,
++			{ u"-c"_q, u"-k"_q, u"--norsrc"_q, folder, zipPath },
++			QString(),
++			timeout)
++		&& QFile::exists(zipPath)) {
++		return true;
++	}
++	const auto script = QString::fromUtf8(
++		"import pathlib, zipfile, sys\n"
++		"root = pathlib.Path(sys.argv[1])\n"
++		"out = pathlib.Path(sys.argv[2])\n"
++		"with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:\n"
++		"    for p in root.rglob('*'):\n"
++		"        if p.is_file():\n"
++		"            z.write(p, p.relative_to(root).as_posix())\n");
++	return RunTool(
++		FindBin(u"python3"_q),
++		{ u"-c"_q, script, folder, zipPath },
++		QString(),
++		timeout)
++		&& QFile::exists(zipPath);
++}
++
++bool UnzipFile(const QString &zipPath, const QString &dest) {
++	QDir().mkpath(dest);
++	const auto timeout = 10 * 60 * 1000;
++	if (RunTool(
++			FindBin(u"unzip"_q),
++			{ u"-qq"_q, u"-o"_q, zipPath, u"-d"_q, dest },
++			QString(),
++			timeout)) {
++		return true;
++	}
++	const auto ditto = FindBin(u"ditto"_q);
++	if (ditto.contains('/')
++		&& RunTool(
++			ditto,
++			{ u"-x"_q, u"-k"_q, zipPath, dest },
++			QString(),
++			timeout)) {
++		return true;
++	}
++	const auto script = QString::fromUtf8(
++		"import zipfile, sys\n"
++		"zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])\n");
++	return RunTool(
++		FindBin(u"python3"_q),
++		{ u"-c"_q, script, zipPath, dest },
++		QString(),
++		timeout);
++}
++
 +bool SendExportViaBot(const QString &zipPath, QString *error) {
 +	EnsureScript();
 +	const auto config = ReadConfig();
@@ -1506,10 +1677,10 @@ index 0000000..ea33098
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..6b888b3
+index 0000000..1250184
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,37 @@
 +#pragma once
 +
 +namespace Window {
@@ -1522,7 +1693,13 @@ index 0000000..6b888b3
 +
 +void StartBotIfEnabled();
 +
++void StartAddAccount();
++
 +[[nodiscard]] bool SendExportViaBot(const QString &zipPath, QString *error);
++
++[[nodiscard]] QString FindBin(const QString &name);
++bool ZipFolder(const QString &folder, const QString &zipPath);
++bool UnzipFile(const QString &zipPath, const QString &dest);
 +
 +inline constexpr int kMinDialogsColumnWidth = 80;
 +inline constexpr int kMinChatColumnWidth = 120;
@@ -1543,10 +1720,10 @@ index 0000000..6b888b3
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
-index 0000000..a7ee934
+index 0000000..eab8cef
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.cpp
-@@ -0,0 +1,546 @@
+@@ -0,0 +1,557 @@
 +#include "custom/custom_export.h"
 +
 +#include "custom/custom_control.h"
@@ -1697,24 +1874,7 @@ index 0000000..a7ee934
 +}
 +
 +bool ZipChildren(const QString &folder, const QString &zipPath) {
-+	QFile::remove(zipPath);
-+	auto names = QDir(folder).entryList(
-+		QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot);
-+	if (names.isEmpty()) {
-+		return false;
-+	}
-+	QProcess proc;
-+	proc.setProgram("zip");
-+	proc.setWorkingDirectory(folder);
-+	auto args = QStringList{ u"-qr"_q, zipPath };
-+	args.append(names);
-+	proc.setArguments(args);
-+	proc.start();
-+	if (!proc.waitForFinished(10 * 60 * 1000)) {
-+		proc.kill();
-+		return false;
-+	}
-+	return proc.exitCode() == 0 && QFile::exists(zipPath);
++	return ZipFolder(folder, zipPath);
 +}
 +
 +[[nodiscard]] QString TelethonString(qint32 dcId, const QByteArray &authKey) {
@@ -1911,7 +2071,6 @@ index 0000000..a7ee934
 +		Ui::Toast::Show(QString::fromUtf8("没有选中帐号"));
 +		return;
 +	}
-+	Q_UNUSED(parent);
 +	const auto stamp = QDateTime::currentDateTime().toString(
 +		"yyyyMMdd-HHmmss");
 +	const auto dir = cWorkingDir() + u"bot/outbox/"_q;
@@ -1924,13 +2083,42 @@ index 0000000..a7ee934
 +		ShowExportResult(0, error);
 +		return;
 +	}
-+	if (!SendExportViaBot(path, &error)) {
-+		ShowExportResult(0, error);
++	QString botError;
++	if (SendExportViaBot(path, &botError)) {
++		QFile::remove(path);
++		DeleteExportedAccounts(accounts);
++		ShowExportResult(n, QString());
 +		return;
 +	}
-+	QFile::remove(path);
-+	DeleteExportedAccounts(accounts);
-+	ShowExportResult(n, QString());
++	const auto keep = accounts;
++	const auto tempPath = path;
++	const auto count = n;
++	FileDialog::GetWritePath(
++		parent ? parent : Core::App().getFileDialogParent(),
++		QString::fromUtf8("保存帐号包"),
++		"Zip (*.zip);;All files (*.*)",
++		QDir::homePath() + '/' + QFileInfo(tempPath).fileName(),
++		[=](QString &&saveTo) {
++			if (saveTo.isEmpty()) {
++				QFile::remove(tempPath);
++				Ui::Toast::Show(QString::fromUtf8("已取消，号还在客户端"));
++				return;
++			}
++			QFile::remove(saveTo);
++			if (!QFile::copy(tempPath, saveTo) && !QFile::rename(tempPath, saveTo)) {
++				ShowExportResult(0, QString::fromUtf8("保存失败"));
++				return;
++			}
++			QFile::remove(tempPath);
++			DeleteExportedAccounts(keep);
++			Ui::Toast::Show(QString::fromUtf8(
++				"已导出 %1 个帐号到 %2").arg(count).arg(saveTo));
++		},
++		[=] {
++			QFile::remove(tempPath);
++			Ui::Toast::Show(QString::fromUtf8(
++				"机器人没发出去，也没有保存文件。号还在。%1").arg(botError));
++		});
 +}
 +
 +} // namespace
@@ -2043,8 +2231,8 @@ index 0000000..a7ee934
 +		box->addRow(object_ptr<Ui::FlatLabel>(
 +			box,
 +			rpl::single(QString::fromUtf8(
-+				"打包后由机器人发给你。发出去才从本机列表移除，不退出登录。"
-+				"发送失败号还在。这个包以后可以再导入。")),
++				"打包后由机器人发给你。发不出去就改存到本地。"
++				"发出去或保存成功才从本机列表移除，不退出登录。取消则号还在。这个包以后可以再导入。")),
 +			st::boxLabel));
 +		const auto search = box->addRow(object_ptr<Ui::InputField>(
 +			box,
@@ -2134,14 +2322,15 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..70bfdd9
+index 0000000..02deaa1
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,637 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
 +#include "core/file_utilities.h"
++#include "custom/custom_control.h"
 +#include "data/data_user.h"
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
@@ -2153,6 +2342,7 @@ index 0000000..70bfdd9
 +#include "storage/serialize_common.h"
 +#include "mtproto/mtproto_auth_key.h"
 +#include "ui/toast/toast.h"
++#include "ui/ui_utility.h"
 +
 +#include <cstring>
 +
@@ -2194,7 +2384,8 @@ index 0000000..70bfdd9
 +bool ReadTelethonSession(
 +		const QString &sessionPath,
 +		qint32 *dcId,
-+		QByteArray *authKey) {
++		QByteArray *authKey,
++		quint64 *userId = nullptr) {
 +	sqlite3 *db = nullptr;
 +	const auto utf8 = QDir::toNativeSeparators(sessionPath).toUtf8();
 +	if (sqlite3_open_v2(
@@ -2222,6 +2413,18 @@ index 0000000..70bfdd9
 +			}
 +		}
 +		sqlite3_finalize(stmt);
++	}
++	if (ok && userId && *userId == 0) {
++		sqlite3_stmt *entity = nullptr;
++		const auto entitySql =
++			"SELECT id FROM entities WHERE id > 0 ORDER BY id LIMIT 1";
++		if (sqlite3_prepare_v2(db, entitySql, -1, &entity, nullptr)
++			== SQLITE_OK) {
++			if (sqlite3_step(entity) == SQLITE_ROW) {
++				*userId = quint64(sqlite3_column_int64(entity, 0));
++			}
++			sqlite3_finalize(entity);
++		}
 +	}
 +	sqlite3_close(db);
 +	return ok;
@@ -2460,7 +2663,8 @@ index 0000000..70bfdd9
 +		if (ReadTelethonSession(
 +				dir.filePath(sessionName),
 +				&result.dcId,
-+				&result.authKey)) {
++				&result.authKey,
++				&result.userId)) {
 +			break;
 +		}
 +	}
@@ -2543,15 +2747,7 @@ index 0000000..70bfdd9
 +}
 +
 +bool UnzipTo(const QString &zipPath, const QString &dest) {
-+	QProcess proc;
-+	proc.setProgram("unzip");
-+	proc.setArguments({ "-qq", "-o", zipPath, "-d", dest });
-+	proc.start();
-+	if (!proc.waitForFinished(10 * 60 * 1000)) {
-+		proc.kill();
-+		return false;
-+	}
-+	return proc.exitCode() == 0;
++	return UnzipFile(zipPath, dest);
 +}
 +
 +void SaveIndexEntry(const ImportedAuth &auth) {
@@ -2641,12 +2837,19 @@ index 0000000..70bfdd9
 +		if (auth.dcId <= 0) {
 +			auth.dcId = 2;
 +		}
-+		if (!domain->importAuthorized(auth.dcId, auth.userId, auth.authKey)) {
++		if (!domain->importAuthorized(
++				auth.dcId,
++				auth.userId,
++				auth.authKey,
++				false)) {
 +			++skipped;
 +			continue;
 +		}
 +		SaveIndexEntry(auth);
 +		++imported;
++	}
++	if (imported > 0) {
++		domain->notifyAccountsChanged();
 +	}
 +	if (!imported && error && error->isEmpty()) {
 +		*error = skipped
@@ -2723,19 +2926,25 @@ index 0000000..70bfdd9
 +	if (zips.isEmpty()) {
 +		return false;
 +	}
-+	auto imported = 0;
-+	QString error;
-+	for (const auto &path : zips) {
-+		imported += ImportAccountPack(path, domain, &error);
-+	}
-+	ShowImportResult(imported, error);
-+	return imported > 0 || !error.isEmpty();
++	// Leave the drop handler before sessions are created. Rebuilding the
++	// account list on this stack deletes the widget that is still in dropEvent.
++	crl::on_main(&Core::App(), [zips, domain] {
++		auto imported = 0;
++		QString error;
++		for (const auto &path : zips) {
++			imported += ImportAccountPack(path, domain, &error);
++		}
++		ShowImportResult(imported, error);
++	});
++	return true;
 +}
 +
 +void ChooseAndImportAccountPack(
 +		QWidget *parent,
 +		not_null<Main::Domain*> domain) {
-+	const auto parentPtr = parent ? parent : Core::App().getFileDialogParent();
++	const auto parentPtr = Core::App().getFileDialogParent()
++		? Core::App().getFileDialogParent()
++		: parent;
 +	FileDialog::GetOpenPath(
 +		parentPtr,
 +		QString::fromUtf8("导入帐号包"),
@@ -2744,12 +2953,12 @@ index 0000000..70bfdd9
 +			if (result.paths.isEmpty()) {
 +				return;
 +			}
-+			QString error;
-+			const auto n = ImportAccountPack(
-+				result.paths.front(),
-+				domain,
-+				&error);
-+			ShowImportResult(n, error);
++			const auto path = result.paths.front();
++			crl::on_main([=] {
++				QString error;
++				const auto n = ImportAccountPack(path, domain, &error);
++				ShowImportResult(n, error);
++			});
 +		});
 +}
 +
@@ -3270,7 +3479,7 @@ index b3e4c28..6a31ba4 100644
  		const auto globalPosition = mapToGlobal(e->pos());
  		const auto thread = _suggestions
 diff --git a/Telegram/SourceFiles/intro/intro_widget.cpp b/Telegram/SourceFiles/intro/intro_widget.cpp
-index f188e0c..616c8f2 100644
+index f188e0c..a95edd1 100644
 --- a/Telegram/SourceFiles/intro/intro_widget.cpp
 +++ b/Telegram/SourceFiles/intro/intro_widget.cpp
 @@ -148,7 +148,12 @@ Widget::Widget(
@@ -3324,8 +3533,32 @@ index f188e0c..616c8f2 100644
  			backRequested();
  		}
  	} else if (e->key() == Qt::Key_Enter
+@@ -895,6 +910,23 @@ void Widget::backRequested() {
+ 	const auto back = getData()->accountBeforeIntro.get();
+ 	if (_stepHistory.size() > 1) {
+ 		historyMove(StackAction::Back, Animate::Back);
++	} else if (const auto window = dynamic_cast<MainWindow*>(
++			&getData()->controller->widget())) {
++		if (window->restoreMainFromIntro()) {
++			return;
++		}
++		if (back && back->sessionExists()) {
++			Core::App().setActivePrimaryWindow(getData()->controller);
++			back->domain().activate(back);
++		} else if (const auto parent
++			= Core::App().domain().maybeLastOrSomeAuthedAccount()) {
++			Core::App().domain().activate(parent);
++		} else {
++			moveToStep(
++				Ui::CreateChild<StartWidget>(this, _account, getData()),
++				StackAction::Replace,
++				Animate::Back);
++		}
+ 	} else if (back && back->sessionExists()) {
+ 		Core::App().setActivePrimaryWindow(getData()->controller);
+ 		back->domain().activate(back);
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
-index efd667d..eed245b 100644
+index efd667d..c5c1571 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
 +++ b/Telegram/SourceFiles/main/main_domain.cpp
 @@ -13,6 +13,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -3364,14 +3597,15 @@ index efd667d..eed245b 100644
  	} else {
  		Assert(!started());
  	}
-@@ -315,6 +326,56 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+@@ -315,6 +326,63 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
  	return account;
  }
  
 +bool Domain::importAuthorized(
 +		qint32 dcId,
 +		quint64 userId,
-+		const QByteArray &authKey) {
++		const QByteArray &authKey,
++		bool notify) {
 +	Expects(started());
 +	if (authKey.size() != 256 || userId == 0) {
 +		return false;
@@ -3413,15 +3647,21 @@ index efd667d..eed245b 100644
 +		keyData));
 +	_local->startAdded(account, std::move(config));
 +	watchSession(account);
-+	_accountsChanges.fire({});
++	if (notify) {
++		_accountsChanges.fire({});
++	}
 +	scheduleWriteAccounts();
 +	return true;
++}
++
++void Domain::notifyAccountsChanged() {
++	_accountsChanges.fire({});
 +}
 +
  void Domain::addActivated(MTP::Environment environment, bool newWindow) {
  	const auto added = [&](not_null<Main::Account*> account) {
  		if (newWindow) {
-@@ -344,6 +405,10 @@ void Domain::watchSession(not_null<Account*> account) {
+@@ -344,6 +412,10 @@ void Domain::watchSession(not_null<Account*> account) {
  	) | rpl::filter([=](Session *session) {
  		return session != nullptr;
  	}) | rpl::on_next([=](Session *session) {
@@ -3432,7 +3672,7 @@ index efd667d..eed245b 100644
  		session->data().unreadBadgeChanges(
  		) | rpl::on_next([=] {
  			scheduleUpdateUnreadBadge();
-@@ -516,14 +581,15 @@ void Domain::scheduleWriteAccounts() {
+@@ -516,14 +588,15 @@ void Domain::scheduleWriteAccounts() {
  }
  
  int Domain::maxAccounts() const {
@@ -3457,7 +3697,7 @@ index efd667d..eed245b 100644
  
  rpl::producer<int> Domain::maxAccountsChanges() const {
 diff --git a/Telegram/SourceFiles/main/main_domain.h b/Telegram/SourceFiles/main/main_domain.h
-index eef6d0e..30ee6ef 100644
+index eef6d0e..2786890 100644
 --- a/Telegram/SourceFiles/main/main_domain.h
 +++ b/Telegram/SourceFiles/main/main_domain.h
 @@ -31,8 +31,8 @@ public:
@@ -3479,11 +3719,16 @@ index eef6d0e..30ee6ef 100644
  	[[nodiscard]] rpl::producer<int> maxAccountsChanges() const;
  
  	[[nodiscard]] Storage::Domain &local() const {
-@@ -70,6 +71,7 @@ public:
+@@ -70,6 +71,12 @@ public:
  	void notifyUnreadBadgeChanged();
  
  	[[nodiscard]] not_null<Main::Account*> add(MTP::Environment environment);
-+	bool importAuthorized(qint32 dcId, quint64 userId, const QByteArray &authKey);
++	bool importAuthorized(
++		qint32 dcId,
++		quint64 userId,
++		const QByteArray &authKey,
++		bool notify = true);
++	void notifyAccountsChanged();
  	void maybeActivate(not_null<Main::Account*> account);
  	void activate(not_null<Main::Account*> account);
  	void addActivated(MTP::Environment environment, bool newWindow = false);
@@ -3992,7 +4237,7 @@ index 82a35ec..876719e 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..839b04f 100644
+index 8acc224..5083059 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
 @@ -282,6 +282,9 @@ void MainWindow::setupIntro(
@@ -4005,11 +4250,71 @@ index 8acc224..839b04f 100644
  	destroyLayer();
  	auto created = object_ptr<Intro::Widget>(
  		bodyWidget(),
-@@ -724,6 +727,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -313,6 +316,55 @@ void MainWindow::setupIntro(
+ 	fixOrder();
+ }
+ 
++bool MainWindow::showAddAccountOverlay(not_null<Main::Account*> account) {
++	if (!_main || _intro) {
++		return false;
++	}
++	_main->hideAccountRail();
++	_main->hide();
++	destroyLayer();
++	auto created = object_ptr<Intro::Widget>(
++		bodyWidget(),
++		&controller(),
++		account,
++		Intro::EnterPoint::Qr,
++		&this->account());
++	created->showSettingsRequested(
++	) | rpl::on_next([=] {
++		showSettings();
++	}, created->lifetime());
++	account->sessionValue(
++	) | rpl::filter([](Main::Session *session) {
++		return session != nullptr;
++	}) | rpl::on_next([=](Main::Session *) {
++		Core::App().domain().activate(account);
++	}, created->lifetime());
++	_intro = std::move(created);
++	_intro->show();
++	updateControlsGeometry();
++	fixOrder();
++	setInnerFocus();
++	return true;
++}
++
++bool MainWindow::restoreMainFromIntro() {
++	if (!_main || !_intro) {
++		return false;
++	}
++	_intro.destroy();
++	_main->show();
++	updateControlsGeometry();
++	_main->activate();
++	fixOrder();
++	setInnerFocus();
++	crl::on_main(&Core::App(), [] {
++		if (Core::App().domain().started()) {
++			Core::App().domain().removeRedundantAccounts();
++		}
++	});
++	return true;
++}
++
+ void MainWindow::setupMain(
+ 		MsgId singlePeerShowAtMsgId,
+ 		QPixmap oldContentCache) {
+@@ -724,6 +776,17 @@ void MainWindow::closeEvent(QCloseEvent *e) {
  		e->accept();
  		return;
  	}
 +	if (_intro) {
++		if (restoreMainFromIntro()) {
++			e->ignore();
++			return;
++		}
 +		if (const auto back = Core::App().domain().maybeLastOrSomeAuthedAccount()) {
 +			e->ignore();
 +			Core::App().domain().activate(back);
@@ -4019,7 +4324,7 @@ index 8acc224..839b04f 100644
  	e->ignore();
  	const auto hasAuth = [&] {
  		if (!Core::App().domain().started()) {
-@@ -750,6 +760,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -750,6 +813,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -4036,15 +4341,28 @@ index 8acc224..839b04f 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
-@@ -791,4 +811,4 @@ MainWindow *wnd() {
+@@ -791,4 +864,4 @@ MainWindow *wnd() {
  		: nullptr;
  }
  
 -} // namespace App
 \ No newline at end of file
 +} // namespace App
+diff --git a/Telegram/SourceFiles/mainwindow.h b/Telegram/SourceFiles/mainwindow.h
+index adecd3c..45bdc43 100644
+--- a/Telegram/SourceFiles/mainwindow.h
++++ b/Telegram/SourceFiles/mainwindow.h
+@@ -63,6 +63,8 @@ public:
+ 		Main::Account *accountBeforeIntro,
+ 		QPixmap oldContentCache);
+ 	void setupMain(MsgId singlePeerShowAtMsgId, QPixmap oldContentCache);
++	bool showAddAccountOverlay(not_null<Main::Account*> account);
++	bool restoreMainFromIntro();
+ 
+ 	void showSettings();
+ 
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
-index a1e5ece..b38c2b2 100644
+index a1e5ece..9050350 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
 +++ b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 @@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4055,16 +4373,17 @@ index a1e5ece..b38c2b2 100644
  #include "ui/unread_badge_paint.h"
  #include "ui/ui_utility.h"
  #include "core/application.h"
-@@ -55,6 +56,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -55,6 +56,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  #include "main/main_account.h"
  #include "main/main_session.h"
  #include "main/main_domain.h"
++#include "custom/custom_control.h"
 +#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
  #include "mtproto/mtproto_dc_options.h"
  #include "window/window_session_controller.h"
  #include "window/window_controller.h"
-@@ -75,6 +78,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+@@ -75,6 +79,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
  
  #include <QtGui/QGuiApplication>
  #include <QtCore/QBuffer>
@@ -4072,7 +4391,7 @@ index a1e5ece..b38c2b2 100644
  
  namespace Settings {
  namespace {
-@@ -227,8 +231,10 @@ private:
+@@ -227,8 +232,10 @@ private:
  	const not_null<Window::SessionController*> _controller;
  	const not_null<Ui::VerticalLayout*> _outer;
  	int _outerIndex = 0;
@@ -4083,7 +4402,7 @@ index a1e5ece..b38c2b2 100644
  	base::flat_map<
  		not_null<::Main::Account*>,
  		base::unique_qptr<Ui::SettingsButton>> _watched;
-@@ -867,8 +873,23 @@ void SetupAccountsWrap(
+@@ -867,8 +874,23 @@ void SetupAccountsWrap(
  
  		Ui::RpWidget userpic;
  		Ui::PeerUserpicView view;
@@ -4107,7 +4426,7 @@ index a1e5ece..b38c2b2 100644
  
  	const auto userpicSkip = 2 * st::mainMenuAccountLine + st::lineWidth;
  	const auto userpicSize = st::mainMenuAccountSize
-@@ -888,7 +909,22 @@ void SetupAccountsWrap(
+@@ -888,7 +910,22 @@ void SetupAccountsWrap(
  		const auto line = st::mainMenuAccountLine;
  		const auto skip = 2 * line + st::lineWidth;
  		const auto full = size + skip * 2;
@@ -4130,7 +4449,7 @@ index a1e5ece..b38c2b2 100644
  		if (active) {
  			const auto shift = st::lineWidth + (line * 0.5);
  			const auto diameter = full - 2 * shift;
-@@ -928,6 +964,9 @@ void SetupAccountsWrap(
+@@ -928,6 +965,9 @@ void SetupAccountsWrap(
  			Info::Profile::CopyPhoneToClipboard(
  				Info::Profile::PhoneValue(session->user()));
  		}, &st::menuIconCopy);
@@ -4140,7 +4459,7 @@ index a1e5ece..b38c2b2 100644
  
  		if (!locked) {
  			if (!isActive) {
-@@ -986,6 +1025,18 @@ Ui::RpWidget *AccountsList::addAccountButton() const {
+@@ -986,6 +1026,18 @@ Ui::RpWidget *AccountsList::addAccountButton() const {
  }
  
  void AccountsList::setup() {
@@ -4159,7 +4478,7 @@ index a1e5ece..b38c2b2 100644
  	_addAccount = setupAdd();
  
  	rpl::single(rpl::empty) | rpl::then(
-@@ -1056,7 +1107,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1056,7 +1108,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  				found = true;
  			}
  		}
@@ -4168,7 +4487,16 @@ index a1e5ece..b38c2b2 100644
  			_controller->show(
  				Box(AccountsLimitBox, &_controller->session()));
  		} else if (newWindow) {
-@@ -1103,9 +1154,8 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1064,7 +1116,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+ 		} else {
+ 			_controller->window().preventOrInvoke([=] {
+ 				Core::App().setActivePrimaryWindow(&_controller->window());
+-				_controller->session().domain().addActivated(environment);
++				Custom::StartAddAccount();
+ 			});
+ 		}
+ 	};
+@@ -1103,9 +1155,8 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  }
  
  void AccountsList::rebuild() {
@@ -4180,7 +4508,7 @@ index a1e5ece..b38c2b2 100644
  
  	_reorder = std::make_unique<Ui::VerticalLayoutReorder>(inner);
  	_reorder->updates(
-@@ -1140,6 +1190,12 @@ void AccountsList::rebuild() {
+@@ -1140,6 +1191,12 @@ void AccountsList::rebuild() {
  		Assert(i != _watched.end());
  
  		auto &button = i->second;
@@ -4193,6 +4521,27 @@ index a1e5ece..b38c2b2 100644
  		if (!account->sessionExists() || list.size() == 1) {
  			button = nullptr;
  		} else if (!button) {
+diff --git a/Telegram/SourceFiles/settings/sections/settings_main.cpp b/Telegram/SourceFiles/settings/sections/settings_main.cpp
+index 42c6a89..6164ab6 100644
+--- a/Telegram/SourceFiles/settings/sections/settings_main.cpp
++++ b/Telegram/SourceFiles/settings/sections/settings_main.cpp
+@@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "boxes/username_box.h"
+ #include "core/application.h"
+ #include "core/click_handler_types.h"
++#include "custom/custom_control.h"
+ #include "data/components/credits.h"
+ #include "data/components/promo_suggestions.h"
+ #include "data/data_chat_filters.h"
+@@ -672,7 +673,7 @@ void Main::fillTopBarMenu(const Ui::Menu::MenuCallback &addAction) {
+ 	if (list.size() < Core::App().domain().maxAccounts()) {
+ 		addAction(tr::lng_menu_add_account(tr::now), [=] {
+ 			Core::App().setActivePrimaryWindow(&controller()->window());
+-			Core::App().domain().addActivated(MTP::Environment{});
++			Custom::StartAddAccount();
+ 		}, &st::menuIconAddAccount);
+ 	}
+ 	if (!controller()->session().supportMode()) {
 diff --git a/Telegram/SourceFiles/settings/sections/settings_shortcuts.cpp b/Telegram/SourceFiles/settings/sections/settings_shortcuts.cpp
 index 02d784e..155ab43 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_shortcuts.cpp
