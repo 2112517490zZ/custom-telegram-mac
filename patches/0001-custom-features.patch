@@ -2382,14 +2382,15 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..1348f03
+index 0000000..930e851
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,818 @@
+@@ -0,0 +1,927 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
 +#include "core/file_utilities.h"
++#include "core/utils.h"
 +#include "custom/custom_control.h"
 +#include "data/data_user.h"
 +#include "main/main_account.h"
@@ -2630,6 +2631,85 @@ index 0000000..1348f03
 +	return false;
 +}
 +
++// Desktop writes one account as "data", the next as "data#2", then "data#3".
++// The mtp file name is the first 8 bytes of MD5(that string), hex-encoded.
++QString OfficialDataName(int index) {
++	auto result = u"data"_q;
++	if (index > 0) {
++		result += '#' + QString::number(index + 1);
++	}
++	return result;
++}
++
++QString OfficialMtpFileName(int index) {
++	Storage::FileKey hash[2] = { 0 };
++	const auto utf8 = OfficialDataName(index).toUtf8();
++	hashMd5(utf8.constData(), utf8.size(), hash);
++	return Storage::details::ToFilePart(hash[0]);
++}
++
++bool ParseMtpSerialized(const QByteArray &serialized, ImportedAuth *out) {
++	QDataStream auth(serialized);
++	auth.setVersion(QDataStream::Qt_5_1);
++	const auto legacyUserId = Serialize::read<qint32>(auth);
++	const auto legacyMainDcId = Serialize::read<qint32>(auth);
++	auto userId = quint64();
++	auto mainDcId = qint32();
++	constexpr auto kWideIdsTag = ~quint64(0);
++	if (((quint64(legacyUserId) << 32) | quint64(legacyMainDcId))
++		== kWideIdsTag) {
++		userId = Serialize::read<quint64>(auth);
++		mainDcId = Serialize::read<qint32>(auth);
++	} else {
++		userId = quint64(legacyUserId);
++		mainDcId = legacyMainDcId;
++	}
++	const auto count = Serialize::read<qint32>(auth);
++	if (auth.status() != QDataStream::Ok || count < 0 || count > 32) {
++		return false;
++	}
++	for (auto i = 0; i != count; ++i) {
++		const auto dcId = Serialize::read<qint32>(auth);
++		const auto key = Serialize::read<MTP::AuthKey::Data>(auth);
++		if (auth.status() != QDataStream::Ok) {
++			return false;
++		}
++		if (dcId == mainDcId) {
++			ApplyKey(out, dcId, userId, key.data(), int(key.size()));
++			return out->authKey.size() == 256;
++		}
++	}
++	return false;
++}
++
++// readMtpData stores exactly one block: dbiMtpAuthorization + the serialized
++// key. Anything else is a settings map. Reading those maps calls into the
++// running app and aborts, so a file that does not start with this block is
++// skipped.
++bool ReadOneMtpFile(
++		const QString &base,
++		const QString &root,
++		const MTP::AuthKeyPtr &localKey,
++		ImportedAuth *out) {
++	using namespace Storage::details;
++	FileReadDescriptor file;
++	if (!ReadEncryptedFile(file, base, root, localKey)) {
++		return false;
++	}
++	auto blockId = quint32();
++	file.stream >> blockId;
++	if (file.stream.status() != QDataStream::Ok
++		|| blockId != dbiMtpAuthorization) {
++		return false;
++	}
++	auto serialized = QByteArray();
++	file.stream >> serialized;
++	if (file.stream.status() != QDataStream::Ok || serialized.isEmpty()) {
++		return false;
++	}
++	return ParseMtpSerialized(serialized, out);
++}
++
 +bool ReadTdataAuths(
 +		const QString &tdataDir,
 +		std::vector<ImportedAuth> *out,
@@ -2645,16 +2725,16 @@ index 0000000..1348f03
 +		&& !ReadFile(keyData, u"key"_q, root)) {
 +		return false;
 +	}
-+	QByteArray salt, keyEncrypted;
-+	keyData.stream >> salt >> keyEncrypted;
++	// startModern: salt, local key encrypted with the desktop passcode,
++	// then the account index list encrypted with the local key.
++	QByteArray salt, keyEncrypted, infoEncrypted;
++	keyData.stream >> salt >> keyEncrypted >> infoEncrypted;
 +	if (salt.size() != LocalEncryptSaltSize) {
 +		return false;
 +	}
 +	const auto passcodeKey = CreateLocalKey(QByteArray(), salt);
 +	EncryptedDescriptor keyInner;
 +	if (!DecryptLocal(keyInner, keyEncrypted, passcodeKey)) {
-+		// Official tdata stores the local key under the desktop passcode.
-+		// An empty passcode is the only case that can be opened here.
 +		if (locked) {
 +			*locked = true;
 +		}
@@ -2665,23 +2745,52 @@ index 0000000..1348f03
 +		return false;
 +	}
 +	const auto localKey = std::make_shared<MTP::AuthKey>(localBytes);
++
++	auto bases = QStringList();
++	const auto addBase = [&](const QString &base) {
++		if (!base.isEmpty() && !bases.contains(base)) {
++			bases.push_back(base);
++		}
++	};
++	EncryptedDescriptor info;
++	if (!infoEncrypted.isEmpty()
++		&& DecryptLocal(info, infoEncrypted, localKey)) {
++		auto count = qint32();
++		info.stream >> count;
++		if (info.stream.status() == QDataStream::Ok
++			&& count > 0
++			&& count <= 256) {
++			for (auto i = 0; i != count; ++i) {
++				auto index = qint32();
++				info.stream >> index;
++				if (info.stream.status() != QDataStream::Ok) {
++					break;
++				}
++				if (index >= 0 && index < 256) {
++					addBase(OfficialMtpFileName(index));
++				}
++			}
++		}
++	}
++	if (bases.isEmpty()) {
++		addBase(OfficialMtpFileName(0));
++	}
++	// Exported packs rename that same mtp file to a fixed hash.
++	addBase(u"D877F783D5D3EF8C"_q);
 +	const auto names = QDir(root).entryList(QDir::Files);
-+	auto seen = QStringList();
 +	for (const auto &name : names) {
 +		auto base = name;
 +		if (base.endsWith('s') || base.endsWith('0') || base.endsWith('1')) {
 +			base.chop(1);
 +		}
-+		if (base.size() < 8 || base.startsWith(u"key"_q) || seen.contains(base)) {
++		if (base.size() < 8 || base.startsWith(u"key"_q)) {
 +			continue;
 +		}
-+		seen.push_back(base);
-+		FileReadDescriptor file;
-+		if (!ReadEncryptedFile(file, base, root, localKey)) {
-+			continue;
-+		}
++		addBase(base);
++	}
++	for (const auto &base : bases) {
 +		auto one = ImportedAuth();
-+		if (!TakeAuthFromStream(file.stream, file.version, &one)) {
++		if (!ReadOneMtpFile(base, root, localKey, &one)) {
 +			continue;
 +		}
 +		if (one.authKey.size() != 256 || !one.userId) {
