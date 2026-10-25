@@ -255,10 +255,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..6602c1e
+index 0000000..7b7fdaa
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,437 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -395,7 +395,9 @@ index 0000000..6602c1e
 +, _controller(controller)
 +, _search(new QLineEdit(this))
 +, _scroll(new QScrollArea(this))
++, _add(new QPushButton(QString::fromUtf8("添加"), this))
 +, _import(new QPushButton(QString::fromUtf8("导入"), this))
++, _file(new QPushButton(QString::fromUtf8("文件"), this))
 +, _export(new QPushButton(QString::fromUtf8("导出"), this))
 +, _bounce(new QTimer(this)) {
 +	setAcceptDrops(true);
@@ -415,24 +417,37 @@ index 0000000..6602c1e
 +		"QPushButton{background:#1f2e3d;color:#d7e4ef;border:1px dashed #6f879b;"
 +		"border-radius:8px;padding:8px 4px;font-size:11px;}"
 +		"QPushButton:hover{background:#35506a;}");
++	_add->setToolTip(QString::fromUtf8("添加帐号"));
++	_import->setToolTip(QString::fromUtf8("导入帐号文件夹"));
++	_file->setToolTip(QString::fromUtf8("文件导入帐号"));
++	_add->setStyleSheet(style);
 +	_import->setStyleSheet(style);
++	_file->setStyleSheet(style);
 +	_export->setStyleSheet(
 +		"QPushButton{background:#4a2a12;color:#f3d2b5;border:1px solid #8a5a2b;"
 +		"border-radius:8px;padding:8px 4px;font-size:11px;}"
 +		"QPushButton:hover{background:#6a3a18;}");
++	_add->raise();
 +	_import->raise();
++	_file->raise();
 +	_export->raise();
 +
 +	connect(_search, &QLineEdit::textChanged, this, [=](const QString &text) {
 +		_query = text.trimmed();
 +		rebuild();
 +	});
++	connect(_add, &QPushButton::clicked, this, [=] {
++		StartAddAccount();
++	});
 +	connect(_import, &QPushButton::clicked, this, [=] {
-+		crl::on_main(this, [=] {
-+			ChooseAndImportAccountPack(
-+				Core::App().getFileDialogParent(),
-+				&_controller->session().domain());
-+		});
++		ChooseAndImportAccountFolder(
++			Core::App().getFileDialogParent(),
++			&Core::App().domain());
++	});
++	connect(_file, &QPushButton::clicked, this, [=] {
++		ChooseAndImportAccountPack(
++			Core::App().getFileDialogParent(),
++			&Core::App().domain());
 +	});
 +	connect(_export, &QPushButton::clicked, this, [=] {
 +		crl::on_main(this, [=] {
@@ -568,7 +583,9 @@ index 0000000..6602c1e
 +	inner->resize(width() > 0 ? width() : Width(), std::max(contentHeight, 8));
 +	_scroll->setWidget(inner);
 +	_inner = inner;
++	_add->raise();
 +	_import->raise();
++	_file->raise();
 +	_export->raise();
 +	_rebuilding = false;
 +}
@@ -635,14 +652,25 @@ index 0000000..6602c1e
 +
 +void AccountRail::resizeEvent(QResizeEvent *e) {
 +	_search->setGeometry(6, 8, width() - 12, 28);
-+	_export->setGeometry(6, height() - 40, width() - 12, 32);
-+	_import->setGeometry(6, height() - 78, width() - 12, 32);
-+	const auto listHeight = std::max(0, height() - 126);
++	const auto buttonH = 28;
++	const auto gap = 4;
++	auto y = height() - 6 - buttonH;
++	const auto place = [&](QPushButton *button) {
++		button->setGeometry(6, y, width() - 12, buttonH);
++		y -= buttonH + gap;
++	};
++	place(_export);
++	place(_file);
++	place(_import);
++	place(_add);
++	const auto listHeight = std::max(0, y - 42);
 +	_scroll->setGeometry(0, 42, width(), listHeight);
 +	if (_inner) {
 +		_inner->setFixedWidth(width());
 +	}
++	_add->raise();
 +	_import->raise();
++	_file->raise();
 +	_export->raise();
 +	_search->raise();
 +}
@@ -670,10 +698,10 @@ index 0000000..6602c1e
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..cc56bde
+index 0000000..497b8a9
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,67 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
@@ -725,7 +753,9 @@ index 0000000..cc56bde
 +	QLineEdit *_search = nullptr;
 +	QScrollArea *_scroll = nullptr;
 +	QWidget *_inner = nullptr;
++	QPushButton *_add = nullptr;
 +	QPushButton *_import = nullptr;
++	QPushButton *_file = nullptr;
 +	QPushButton *_export = nullptr;
 +	QTimer *_bounce = nullptr;
 +	QString _query;
@@ -741,10 +771,10 @@ index 0000000..cc56bde
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..97ff7a8
+index 0000000..e095aa0
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,930 @@
+@@ -0,0 +1,956 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1451,33 +1481,56 @@ index 0000000..97ff7a8
 +	StartServe();
 +}
 +
++namespace {
++
++bool FileDialogActiveFlag = false;
++int AccountSwitchDepth = 0;
++
++} // namespace
++
++void SetFileDialogActive(bool active) {
++	FileDialogActiveFlag = active;
++}
++
++bool FileDialogActive() {
++	return FileDialogActiveFlag;
++}
++
++void BeginAccountSwitch() {
++	++AccountSwitchDepth;
++	crl::on_main(&Core::App(), [] {
++		crl::on_main(&Core::App(), [] {
++			if (AccountSwitchDepth > 0) {
++				--AccountSwitchDepth;
++			}
++		});
++	});
++}
++
++bool AccountSwitching() {
++	return AccountSwitchDepth > 0;
++}
++
 +void StartAddAccount() {
-+	if (!Core::App().domain().started()) {
-+		return;
-+	}
-+	const auto window = Core::App().activePrimaryWindow();
-+	if (!window) {
-+		Core::App().domain().addActivated(MTP::Environment{});
-+		return;
-+	}
-+	crl::on_main(window, [=] {
-+		auto &domain = Core::App().domain();
-+		if (!domain.started()) {
++	crl::on_main(&Core::App(), [] {
++		if (!Core::App().domain().started()) {
 +			return;
 +		}
++		auto &domain = Core::App().domain();
++		domain.removeRedundantAccounts();
 +		if (int(domain.accounts().size()) >= domain.maxAccounts()) {
 +			Ui::Toast::Show(QString::fromUtf8(
 +				"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
 +			return;
 +		}
-+		const auto current = &domain.active();
-+		auto *main = window->widget().get();
-+		if (current->sessionExists() && main && main->sessionContent()) {
-+			const auto added = domain.add(MTP::Environment{});
-+			if (main->showAddAccountOverlay(added)) {
-+				return;
-+			}
++		const auto window = Core::App().activePrimaryWindow();
++		if (window) {
++			Core::App().setActivePrimaryWindow(window);
 +		}
++		// Official path: activate the new account, then the window shows
++		// the QR intro and destroys the old main widget. Keeping both
++		// widgets alive is what quit the process on click.
++		BeginAccountSwitch();
 +		domain.addActivated(MTP::Environment{});
 +	});
 +}
@@ -1630,7 +1683,7 @@ index 0000000..97ff7a8
 +		const auto limit = box->addRow(object_ptr<Ui::InputField>(
 +			box,
 +			st::defaultInputField,
-+			rpl::single(QString::fromUtf8("帐号数量上限 1-500")),
++			rpl::single(QString::fromUtf8("帐号数量上限")),
 +			QString::number(Core::App().domain().maxAccounts())));
 +		const auto token = box->addRow(object_ptr<Ui::InputField>(
 +			box,
@@ -1656,6 +1709,9 @@ index 0000000..97ff7a8
 +			st::boxLabel));
 +		box->addButton(tr::lng_settings_save(), [=] {
 +			auto n = limit->getLastText().trimmed().toInt();
++			if (n <= 0) {
++				n = Core::App().domain().maxAccounts();
++			}
 +			n = std::clamp(n, 1, Main::Domain::kMaxAccounts);
 +			SetEnhancedValue("max_accounts", n);
 +			EnhancedSettings::Write();
@@ -1677,10 +1733,10 @@ index 0000000..97ff7a8
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..1250184
+index 0000000..642f012
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,37 @@
+@@ -0,0 +1,42 @@
 +#pragma once
 +
 +namespace Window {
@@ -1694,6 +1750,11 @@ index 0000000..1250184
 +void StartBotIfEnabled();
 +
 +void StartAddAccount();
++
++void SetFileDialogActive(bool active);
++[[nodiscard]] bool FileDialogActive();
++void BeginAccountSwitch();
++[[nodiscard]] bool AccountSwitching();
 +
 +[[nodiscard]] bool SendExportViaBot(const QString &zipPath, QString *error);
 +
@@ -2322,10 +2383,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..02deaa1
+index 0000000..e854158
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,637 @@
+@@ -0,0 +1,675 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -2928,15 +2989,32 @@ index 0000000..02deaa1
 +	}
 +	// Leave the drop handler before sessions are created. Rebuilding the
 +	// account list on this stack deletes the widget that is still in dropEvent.
++	SetFileDialogActive(true);
 +	crl::on_main(&Core::App(), [zips, domain] {
 +		auto imported = 0;
 +		QString error;
 +		for (const auto &path : zips) {
 +			imported += ImportAccountPack(path, domain, &error);
 +		}
++		SetFileDialogActive(false);
 +		ShowImportResult(imported, error);
 +	});
 +	return true;
++}
++
++void FinishImport(const QString &path, not_null<Main::Domain*> domain) {
++	Ui::Toast::Show(QString::fromUtf8("正在导入，请稍等"));
++	crl::on_main(&Core::App(), [=] {
++		if (!domain->started()) {
++			SetFileDialogActive(false);
++			ShowImportResult(0, QString::fromUtf8("客户端还没准备好"));
++			return;
++		}
++		QString error;
++		const auto n = ImportAccountPack(path, domain, &error);
++		SetFileDialogActive(false);
++		ShowImportResult(n, error);
++	});
 +}
 +
 +void ChooseAndImportAccountPack(
@@ -2945,30 +3023,51 @@ index 0000000..02deaa1
 +	const auto parentPtr = Core::App().getFileDialogParent()
 +		? Core::App().getFileDialogParent()
 +		: parent;
++	SetFileDialogActive(true);
 +	FileDialog::GetOpenPath(
 +		parentPtr,
-+		QString::fromUtf8("导入帐号包"),
++		QString::fromUtf8("文件导入帐号"),
 +		"Zip (*.zip);;All files (*.*)",
 +		[=](const FileDialog::OpenResult &result) {
 +			if (result.paths.isEmpty()) {
++				SetFileDialogActive(false);
 +				return;
 +			}
 +			const auto path = result.paths.front();
-+			crl::on_main([=] {
-+				QString error;
-+				const auto n = ImportAccountPack(path, domain, &error);
-+				ShowImportResult(n, error);
-+			});
-+		});
++			crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
++		},
++		[=] { SetFileDialogActive(false); });
++}
++
++void ChooseAndImportAccountFolder(
++		QWidget *parent,
++		not_null<Main::Domain*> domain) {
++	const auto parentPtr = Core::App().getFileDialogParent()
++		? Core::App().getFileDialogParent()
++		: parent;
++	SetFileDialogActive(true);
++	FileDialog::GetFolder(
++		parentPtr,
++		QString::fromUtf8("导入帐号"),
++		QString(),
++		[=](QString &&result) {
++			if (result.isEmpty()) {
++				SetFileDialogActive(false);
++				return;
++			}
++			const auto path = result;
++			crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
++		},
++		[=] { SetFileDialogActive(false); });
 +}
 +
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.h b/Telegram/SourceFiles/custom/custom_import.h
 new file mode 100644
-index 0000000..bfe9a6c
+index 0000000..b1d0e3d
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.h
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,51 @@
 +#pragma once
 +
 +#include "base/basic_types.h"
@@ -2999,6 +3098,9 @@ index 0000000..bfe9a6c
 +};
 +
 +void ChooseAndImportAccountPack(
++	QWidget *parent,
++	not_null<Main::Domain*> domain);
++void ChooseAndImportAccountFolder(
 +	QWidget *parent,
 +	not_null<Main::Domain*> domain);
 +
@@ -3557,7 +3659,7 @@ index f188e0c..91bcdff 100644
  		Core::App().setActivePrimaryWindow(getData()->controller);
  		back->domain().activate(back);
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
-index efd667d..c5c1571 100644
+index efd667d..80ff046 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
 +++ b/Telegram/SourceFiles/main/main_domain.cpp
 @@ -13,6 +13,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -3660,18 +3762,25 @@ index efd667d..c5c1571 100644
  void Domain::addActivated(MTP::Environment environment, bool newWindow) {
  	const auto added = [&](not_null<Main::Account*> account) {
  		if (newWindow) {
-@@ -344,6 +412,10 @@ void Domain::watchSession(not_null<Account*> account) {
+@@ -343,7 +411,16 @@ void Domain::watchSession(not_null<Account*> account) {
+ 	account->sessionValue(
  	) | rpl::filter([=](Session *session) {
  		return session != nullptr;
- 	}) | rpl::on_next([=](Session *session) {
-+		session->settings().autoDownload() = Data::AutoDownload::Full::FullDisabled();
-+		session->saveSettingsDelayed();
-+		session->updates().updateOnline();
+-	}) | rpl::on_next([=](Session *session) {
++	}	) | rpl::on_next([=](Session *session) {
++		// Do not touch MTP from the import/add stack. That path runs
++		// inside a file dialog callback and a synchronous online update
++		// aborts the process.
++		crl::on_main(session, [=] {
++			session->settings().autoDownload() = Data::AutoDownload::Full::FullDisabled();
++			session->saveSettingsDelayed();
++			session->updates().updateOnline();
++		});
 +
  		session->data().unreadBadgeChanges(
  		) | rpl::on_next([=] {
  			scheduleUpdateUnreadBadge();
-@@ -516,14 +588,15 @@ void Domain::scheduleWriteAccounts() {
+@@ -516,14 +593,15 @@ void Domain::scheduleWriteAccounts() {
  }
  
  int Domain::maxAccounts() const {
@@ -3696,21 +3805,22 @@ index efd667d..c5c1571 100644
  
  rpl::producer<int> Domain::maxAccountsChanges() const {
 diff --git a/Telegram/SourceFiles/main/main_domain.h b/Telegram/SourceFiles/main/main_domain.h
-index eef6d0e..2786890 100644
+index eef6d0e..c18f42f 100644
 --- a/Telegram/SourceFiles/main/main_domain.h
 +++ b/Telegram/SourceFiles/main/main_domain.h
-@@ -31,8 +31,8 @@ public:
+@@ -31,8 +31,9 @@ public:
  		std::unique_ptr<Account> account;
  	};
  
 -	static constexpr auto kMaxAccounts = 100;
 -	static constexpr auto kPremiumMaxAccounts = 6;
-+	static constexpr auto kMaxAccounts = 500;
-+	static constexpr auto kPremiumMaxAccounts = 500;
++	// Corrupt-file guard only. The control-panel value is the real limit.
++	static constexpr auto kMaxAccounts = 1000000;
++	static constexpr auto kPremiumMaxAccounts = 1000000;
  
  	explicit Domain(const QString &dataName);
  	~Domain();
-@@ -43,6 +43,7 @@ public:
+@@ -43,6 +44,7 @@ public:
  	void finish();
  
  	[[nodiscard]] int maxAccounts() const;
@@ -3718,7 +3828,7 @@ index eef6d0e..2786890 100644
  	[[nodiscard]] rpl::producer<int> maxAccountsChanges() const;
  
  	[[nodiscard]] Storage::Domain &local() const {
-@@ -70,6 +71,12 @@ public:
+@@ -70,6 +72,12 @@ public:
  	void notifyUnreadBadgeChanged();
  
  	[[nodiscard]] not_null<Main::Account*> add(MTP::Environment environment);
@@ -4236,10 +4346,29 @@ index 82a35ec..876719e 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..5083059 100644
+index 8acc224..be0a37b 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
-@@ -282,6 +282,9 @@ void MainWindow::setupIntro(
+@@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "lang/lang_instance.h"
+ #include "core/sandbox.h"
+ #include "core/application.h"
++#include "custom/custom_control.h"
+ #include "export/export_manager.h"
+ #include "inline_bots/bot_attach_web_view.h" // AttachWebView::cancel.
+ #include "intro/intro_widget.h"
+@@ -149,7 +150,9 @@ void MainWindow::finishFirstShow() {
+ 
+ 	setAttribute(Qt::WA_NoSystemBackground);
+ 
+-	if (!_passcodeLock && !_setupEmailLock && _main) {
++	if (!_passcodeLock && !_setupEmailLock && _intro && !_intro->isHidden()) {
++		_intro->setInnerFocus();
++	} else if (!_passcodeLock && !_setupEmailLock && _main && !_main->isHidden()) {
+ 		_main->activate();
+ 	} else if (!_passcodeLock && !_setupEmailLock && _intro) {
+ 		_intro->setInnerFocus();
+@@ -282,6 +285,9 @@ void MainWindow::setupIntro(
  		QPixmap oldContentCache) {
  	auto animated = (_main || _passcodeLock || _setupEmailLock);
  
@@ -4249,41 +4378,10 @@ index 8acc224..5083059 100644
  	destroyLayer();
  	auto created = object_ptr<Intro::Widget>(
  		bodyWidget(),
-@@ -313,6 +316,55 @@ void MainWindow::setupIntro(
+@@ -313,6 +319,24 @@ void MainWindow::setupIntro(
  	fixOrder();
  }
  
-+bool MainWindow::showAddAccountOverlay(not_null<Main::Account*> account) {
-+	if (!_main || _intro) {
-+		return false;
-+	}
-+	_main->hideAccountRail();
-+	_main->hide();
-+	destroyLayer();
-+	auto created = object_ptr<Intro::Widget>(
-+		bodyWidget(),
-+		&controller(),
-+		account,
-+		Intro::EnterPoint::Qr,
-+		&this->account());
-+	created->showSettingsRequested(
-+	) | rpl::on_next([=] {
-+		showSettings();
-+	}, created->lifetime());
-+	account->sessionValue(
-+	) | rpl::filter([](Main::Session *session) {
-+		return session != nullptr;
-+	}) | rpl::on_next([=](Main::Session *) {
-+		Core::App().domain().activate(account);
-+	}, created->lifetime());
-+	_intro = std::move(created);
-+	_intro->show();
-+	updateControlsGeometry();
-+	fixOrder();
-+	setInnerFocus();
-+	return true;
-+}
-+
 +bool MainWindow::restoreMainFromIntro() {
 +	if (!_main || !_intro) {
 +		return false;
@@ -4305,10 +4403,16 @@ index 8acc224..5083059 100644
  void MainWindow::setupMain(
  		MsgId singlePeerShowAtMsgId,
  		QPixmap oldContentCache) {
-@@ -724,6 +776,17 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -724,6 +748,23 @@ void MainWindow::closeEvent(QCloseEvent *e) {
  		e->accept();
  		return;
  	}
++	// A file dialog or the add-account switch can synthesize a close.
++	// Hiding or quitting here is what made those buttons look like a crash.
++	if (Custom::FileDialogActive() || Custom::AccountSwitching()) {
++		e->ignore();
++		return;
++	}
 +	if (_intro) {
 +		if (restoreMainFromIntro()) {
 +			e->ignore();
@@ -4323,7 +4427,23 @@ index 8acc224..5083059 100644
  	e->ignore();
  	const auto hasAuth = [&] {
  		if (!Core::App().domain().started()) {
-@@ -750,6 +813,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -736,9 +777,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+ 		}
+ 		return false;
+ 	}();
+-	if (!hasAuth || !hideNoQuit()) {
+-		Core::Quit();
++	if (!hasAuth) {
++		if (!hideNoQuit()) {
++			Core::Quit();
++		}
++		return;
+ 	}
++	hideNoQuit();
+ }
+ 
+ void MainWindow::updateControlsGeometry() {
+@@ -750,6 +795,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -4340,7 +4460,7 @@ index 8acc224..5083059 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
-@@ -791,4 +864,4 @@ MainWindow *wnd() {
+@@ -791,4 +846,4 @@ MainWindow *wnd() {
  		: nullptr;
  }
  
@@ -4348,20 +4468,19 @@ index 8acc224..5083059 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.h b/Telegram/SourceFiles/mainwindow.h
-index adecd3c..45bdc43 100644
+index adecd3c..29b89c0 100644
 --- a/Telegram/SourceFiles/mainwindow.h
 +++ b/Telegram/SourceFiles/mainwindow.h
-@@ -63,6 +63,8 @@ public:
+@@ -63,6 +63,7 @@ public:
  		Main::Account *accountBeforeIntro,
  		QPixmap oldContentCache);
  	void setupMain(MsgId singlePeerShowAtMsgId, QPixmap oldContentCache);
-+	bool showAddAccountOverlay(not_null<Main::Account*> account);
 +	bool restoreMainFromIntro();
  
  	void showSettings();
  
 diff --git a/Telegram/SourceFiles/settings/sections/settings_information.cpp b/Telegram/SourceFiles/settings/sections/settings_information.cpp
-index a1e5ece..9050350 100644
+index a1e5ece..78f9189 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_information.cpp
 +++ b/Telegram/SourceFiles/settings/sections/settings_information.cpp
 @@ -30,6 +30,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4477,7 +4596,15 @@ index a1e5ece..9050350 100644
  	_addAccount = setupAdd();
  
  	rpl::single(rpl::empty) | rpl::then(
-@@ -1056,7 +1108,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1046,7 +1098,6 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+ 	using Environment = MTP::Environment;
+ 	const auto add = [=](Environment environment, bool newWindow = false) {
+ 		auto &domain = _controller->session().domain();
+-		domain.removeRedundantAccounts();
+ 
+ 		auto found = false;
+ 		for (const auto &[index, account] : domain.accounts()) {
+@@ -1056,7 +1107,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  				found = true;
  			}
  		}
@@ -4486,7 +4613,7 @@ index a1e5ece..9050350 100644
  			_controller->show(
  				Box(AccountsLimitBox, &_controller->session()));
  		} else if (newWindow) {
-@@ -1064,7 +1116,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1064,7 +1115,7 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  		} else {
  			_controller->window().preventOrInvoke([=] {
  				Core::App().setActivePrimaryWindow(&_controller->window());
@@ -4495,7 +4622,7 @@ index a1e5ece..9050350 100644
  			});
  		}
  	};
-@@ -1103,9 +1155,8 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
+@@ -1103,9 +1154,8 @@ not_null<Ui::SlideWrap<Ui::SettingsButton>*> AccountsList::setupAdd() {
  }
  
  void AccountsList::rebuild() {
@@ -4507,7 +4634,7 @@ index a1e5ece..9050350 100644
  
  	_reorder = std::make_unique<Ui::VerticalLayoutReorder>(inner);
  	_reorder->updates(
-@@ -1140,6 +1191,12 @@ void AccountsList::rebuild() {
+@@ -1140,6 +1190,12 @@ void AccountsList::rebuild() {
  		Assert(i != _watched.end());
  
  		auto &button = i->second;
@@ -4520,6 +4647,15 @@ index a1e5ece..9050350 100644
  		if (!account->sessionExists() || list.size() == 1) {
  			button = nullptr;
  		} else if (!button) {
+@@ -1191,7 +1247,7 @@ void AccountsList::rebuild() {
+ 		std::max(1, count - premiumLimit));
+ 
+ 	_addAccount->toggle(
+-		(count < ::Main::Domain::kMaxAccounts),
++		(count < premiumLimit),
+ 		anim::type::instant);
+ 
+ 	_reorder->start();
 diff --git a/Telegram/SourceFiles/settings/sections/settings_main.cpp b/Telegram/SourceFiles/settings/sections/settings_main.cpp
 index 42c6a89..6164ab6 100644
 --- a/Telegram/SourceFiles/settings/sections/settings_main.cpp
