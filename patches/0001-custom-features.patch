@@ -357,7 +357,7 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..9017d3b
+index 0000000..16ae97e
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 @@ -0,0 +1,480 @@
@@ -561,8 +561,8 @@ index 0000000..9017d3b
 +		_importChoices = nullptr;
 +		return;
 +	}
-+	// A native menu that opens a file panel deadlocks on Mac. This is an
-+	// ordinary widget; the panel opens only after the click has returned.
++	// The choice is an ordinary widget. The file window opens only after
++	// this click has returned, and it is not the native Mac panel.
 +	auto *box = new QFrame(this);
 +	_importChoices = box;
 +	box->setStyleSheet(
@@ -918,10 +918,10 @@ index 0000000..55457ae
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..19afe8c
+index 0000000..afdede2
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,985 @@
+@@ -0,0 +1,988 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1666,20 +1666,23 @@ index 0000000..19afe8c
 +	ReturnScheduled = true;
 +	BeginAccountSwitch();
 +	crl::on_main(&Core::App(), [=] {
-+		if (!account->sessionExists()) {
-+			ReturnScheduled = false;
++		ReturnScheduled = false;
++		if (!account->sessionExists() || !Core::App().domain().started()) {
 +			return;
 +		}
 +		Core::App().setActivePrimaryWindow(controller);
-+		controller->showAccount(account);
++		// One switch only. showAccount() plus activateWindow() on this
++		// stack is the freeze: the slide grab deadlocks, then Mac waits
++		// forever inside activateWindow while the intro is torn down.
 +		if (&account->domain().active() != account.get()) {
 +			account->domain().activate(account);
++		} else {
++			controller->showAccount(account);
 +		}
 +		const auto window = controller->widget();
-+		window->show();
-+		window->raise();
-+		window->activateWindow();
-+		ReturnScheduled = false;
++		if (!window->isVisible()) {
++			window->show();
++		}
 +	});
 +}
 +
@@ -2568,10 +2571,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..9748db5
+index 0000000..92b7b7d
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,933 @@
+@@ -0,0 +1,958 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -2607,8 +2610,10 @@ index 0000000..9748db5
 +#include <QtCore/QMimeData>
 +#include <QtCore/QProcess>
 +#include <QtCore/QRegularExpression>
++#include <QtCore/QStandardPaths>
 +#include <QtCore/QTemporaryDir>
 +#include <QtCore/QUrl>
++#include <QtWidgets/QFileDialog>
 +#include <sqlite3.h>
 +
 +namespace Custom {
@@ -3466,42 +3471,65 @@ index 0000000..9748db5
 +	(void)domain;
 +}
 +
++void OpenImportDialog(bool folder, not_null<Main::Domain*> domain) {
++	// QFileDialog::getOpenFileName / getExistingDirectory run a nested
++	// event loop around NSOpenPanel. On Mac that loop never returns, so
++	// the process is frozen before the panel is usable. A non-native
++	// dialog shown with show() does not take that lock.
++	SetFileDialogActive(true);
++	auto *dialog = new QFileDialog();
++	dialog->setAttribute(Qt::WA_DeleteOnClose);
++	dialog->setOption(QFileDialog::DontUseNativeDialog, true);
++	dialog->setWindowFlag(Qt::WindowStaysOnTopHint, true);
++	dialog->setWindowTitle(folder
++		? QString::fromUtf8("导入帐号文件夹")
++		: QString::fromUtf8("压缩包导入帐号"));
++	auto start = QStandardPaths::writableLocation(
++		QStandardPaths::DownloadLocation);
++	if (start.isEmpty()) {
++		start = QDir::homePath();
++	}
++	dialog->setDirectory(start);
++	if (folder) {
++		dialog->setFileMode(QFileDialog::Directory);
++		dialog->setOption(QFileDialog::ShowDirsOnly, true);
++	} else {
++		dialog->setFileMode(QFileDialog::ExistingFile);
++		dialog->setNameFilter(u"Zip (*.zip);;All files (*)"_q);
++	}
++	dialog->setStyleSheet(
++		"QWidget{background:#ffffff;color:#111111;}"
++		"QLineEdit,QTreeView,QListView,QComboBox{background:#ffffff;color:#111111;}"
++		"QPushButton{background:#e8e8e8;color:#111111;padding:4px 12px;}");
++	QObject::connect(dialog, &QDialog::finished, &Core::App(), [=](int code) {
++		if (code != QDialog::Accepted) {
++			ReleaseFileDialog();
++			return;
++		}
++		const auto files = dialog->selectedFiles();
++		if (files.isEmpty() || files.front().isEmpty()) {
++			ReleaseFileDialog();
++			return;
++		}
++		const auto path = files.front();
++		crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
++	});
++	dialog->show();
++	dialog->raise();
++}
++
 +void ChooseAndImportAccountPack(
 +		QWidget *parent,
 +		not_null<Main::Domain*> domain) {
-+	SetFileDialogActive(true);
-+	FileDialog::GetOpenPath(
-+		parent,
-+		QString::fromUtf8("压缩包导入帐号"),
-+		"Zip (*.zip);;All files (*.*)",
-+		[=](const FileDialog::OpenResult &result) {
-+			if (result.paths.isEmpty()) {
-+				ReleaseFileDialog();
-+				return;
-+			}
-+			const auto path = result.paths.front();
-+			crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
-+		},
-+		[=] { ReleaseFileDialog(); });
++	(void)parent;
++	OpenImportDialog(false, domain);
 +}
 +
 +void ChooseAndImportAccountFolder(
 +		QWidget *parent,
 +		not_null<Main::Domain*> domain) {
-+	SetFileDialogActive(true);
-+	FileDialog::GetFolder(
-+		parent,
-+		QString::fromUtf8("导入帐号文件夹"),
-+		QString(),
-+		[=](QString &&result) {
-+			if (result.isEmpty()) {
-+				ReleaseFileDialog();
-+				return;
-+			}
-+			const auto path = result;
-+			crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
-+		},
-+		[=] { ReleaseFileDialog(); });
++	(void)parent;
++	OpenImportDialog(true, domain);
 +}
 +
 +} // namespace Custom
@@ -4931,7 +4959,7 @@ index 82a35ec..876719e 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..bf684d4 100644
+index 8acc224..a18def1 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
 @@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4953,7 +4981,19 @@ index 8acc224..bf684d4 100644
  		_main->activate();
  	} else if (!_passcodeLock && !_setupEmailLock && _intro) {
  		_intro->setInnerFocus();
-@@ -282,6 +285,9 @@ void MainWindow::setupIntro(
+@@ -167,6 +170,11 @@ void MainWindow::clearWidgetsHook() {
+ }
+ 
+ QPixmap MainWindow::grabForSlideAnimation() {
++	// The intro is about to be destroyed. Grabbing it on macOS waits on
++	// the window server and never returns, so the whole process freezes.
++	if (_intro) {
++		return {};
++	}
+ 	const auto body = bodyWidget();
+ 	return body->size().isEmpty() ? QPixmap() : Ui::GrabWidget(body);
+ }
+@@ -282,6 +290,9 @@ void MainWindow::setupIntro(
  		QPixmap oldContentCache) {
  	auto animated = (_main || _passcodeLock || _setupEmailLock);
  
@@ -4963,7 +5003,7 @@ index 8acc224..bf684d4 100644
  	destroyLayer();
  	auto created = object_ptr<Intro::Widget>(
  		bodyWidget(),
-@@ -313,6 +319,24 @@ void MainWindow::setupIntro(
+@@ -313,12 +324,34 @@ void MainWindow::setupIntro(
  	fixOrder();
  }
  
@@ -4988,7 +5028,27 @@ index 8acc224..bf684d4 100644
  void MainWindow::setupMain(
  		MsgId singlePeerShowAtMsgId,
  		QPixmap oldContentCache) {
-@@ -716,11 +740,26 @@ void MainWindow::fixOrder() {
+ 	Expects(account().sessionExists());
+ 
+-	const auto animated = _intro
++	// showAnimated() grabs the new main widget before macOS has displayed
++	// it. That grab deadlocks the window server, which is the freeze on
++	// the intro back button. Show the chats directly instead.
++	const auto fromIntro = (_intro != nullptr);
++	const auto animated = fromIntro
+ 		|| (_passcodeLock && !Core::App().passcodeLocked())
+ 		|| _setupEmailLock;
+ 	const auto weakAnimatedLayer = (_main
+@@ -346,7 +379,7 @@ void MainWindow::setupMain(
+ 	} else {
+ 		_main->show();
+ 		updateControlsGeometry();
+-		if (animated) {
++		if (animated && !fromIntro && !oldContentCache.isNull()) {
+ 			_main->showAnimated(std::move(oldContentCache));
+ 		} else {
+ 			_main->activate();
+@@ -716,11 +749,26 @@ void MainWindow::fixOrder() {
  }
  
  void MainWindow::closeEvent(QCloseEvent *e) {
@@ -5016,7 +5076,7 @@ index 8acc224..bf684d4 100644
  		e->accept();
  		return;
  	}
-@@ -736,9 +775,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -736,9 +784,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
  		}
  		return false;
  	}();
@@ -5032,7 +5092,7 @@ index 8acc224..bf684d4 100644
  }
  
  void MainWindow::updateControlsGeometry() {
-@@ -750,6 +793,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -750,6 +802,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -5049,7 +5109,7 @@ index 8acc224..bf684d4 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
-@@ -791,4 +844,4 @@ MainWindow *wnd() {
+@@ -791,4 +853,4 @@ MainWindow *wnd() {
  		: nullptr;
  }
  
