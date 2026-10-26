@@ -357,10 +357,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..16ae97e
+index 0000000..f7aaa52
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,525 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -386,7 +386,9 @@ index 0000000..16ae97e
 +#include <QtGui/QMouseEvent>
 +#include <QtGui/QPainter>
 +#include <QtWidgets/QFrame>
++#include <QtWidgets/QLabel>
 +#include <QtWidgets/QLineEdit>
++#include <QtWidgets/QPlainTextEdit>
 +#include <QtWidgets/QPushButton>
 +#include <QtWidgets/QScrollArea>
 +#include <QtWidgets/QVBoxLayout>
@@ -536,10 +538,10 @@ index 0000000..16ae97e
 +		rebuild();
 +	});
 +	connect(_add, &QPushButton::clicked, this, [=] {
-+		StartAddAccount();
++		showLoginSheet();
 +	});
 +	connect(_import, &QPushButton::clicked, this, [=] {
-+		showImportChoices();
++		showLoginSheet();
 +	});
 +	connect(_export, &QPushButton::clicked, this, [=] {
 +		crl::on_main(this, [=] {
@@ -555,52 +557,95 @@ index 0000000..16ae97e
 +	rebuild();
 +}
 +
-+void AccountRail::showImportChoices() {
++void AccountRail::showLoginSheet() {
 +	if (_importChoices) {
 +		_importChoices->deleteLater();
 +		_importChoices = nullptr;
 +		return;
 +	}
-+	// The choice is an ordinary widget. The file window opens only after
-+	// this click has returned, and it is not the native Mac panel.
-+	auto *box = new QFrame(this);
-+	_importChoices = box;
-+	box->setStyleSheet(
-+		"QFrame{background:#1f2e3d;border:1px solid #6f879b;border-radius:8px;}"
-+		"QPushButton{background:transparent;color:#d7e4ef;border:0;"
-+		"padding:6px;font-size:11px;}"
-+		"QPushButton:hover{background:#35506a;}");
-+	auto *layout = new QVBoxLayout(box);
-+	layout->setContentsMargins(4, 4, 4, 4);
-+	layout->setSpacing(2);
-+	const auto open = [=](bool folder) {
-+		box->hide();
-+		box->deleteLater();
-+		if (_importChoices == box) {
++	auto *host = _controller->widget().get();
++	auto *sheet = new QFrame(host);
++	_importChoices = sheet;
++	sheet->setStyleSheet(
++		"QFrame#loginSheet{background:#1c2733;border:1px solid #3e5670;border-radius:14px;}"
++		"QLabel{color:#e8f0f7;background:transparent;}"
++		"QPushButton{background:#2b5278;color:#ffffff;border:0;border-radius:8px;padding:9px 12px;font-size:13px;}"
++		"QPushButton:hover{background:#376890;}"
++		"QLineEdit,QPlainTextEdit{background:#0e1621;color:#ffffff;border:1px solid #3e5670;border-radius:8px;padding:6px;font-size:12px;}");
++	sheet->setObjectName(u"loginSheet"_q);
++	auto *layout = new QVBoxLayout(sheet);
++	layout->setContentsMargins(16, 16, 16, 16);
++	layout->setSpacing(8);
++	auto *title = new QLabel(QString::fromUtf8("添加帐号"), sheet);
++	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
++	auto *hint = new QLabel(
++		QString::fromUtf8("扫码、手机号、密钥、tdata 都会直接连上，不用重启。"),
++		sheet);
++	hint->setWordWrap(true);
++	hint->setStyleSheet(u"color:#9bb0c3;font-size:12px;"_q);
++	layout->addWidget(title);
++	layout->addWidget(hint);
++
++	const auto closeSheet = [=] {
++		sheet->deleteLater();
++		if (_importChoices == sheet) {
 +			_importChoices = nullptr;
 +		}
-+		SetFileDialogActive(true);
-+		QTimer::singleShot(0, &Core::App(), [=] {
-+			if (folder) {
-+				ChooseAndImportAccountFolder(
-+					nullptr,
-+					&Core::App().domain());
-+			} else {
-+				ChooseAndImportAccountPack(
-+					nullptr,
-+					&Core::App().domain());
-+			}
-+		});
 +	};
-+	auto *folder = new QPushButton(QString::fromUtf8("文件夹"), box);
-+	auto *zip = new QPushButton(QString::fromUtf8("压缩包"), box);
-+	layout->addWidget(folder);
-+	layout->addWidget(zip);
-+	connect(folder, &QPushButton::clicked, this, [=] { open(true); });
-+	connect(zip, &QPushButton::clicked, this, [=] { open(false); });
-+	box->setGeometry(6, std::max(0, _import->y() - 68), width() - 12, 64);
-+	box->show();
-+	box->raise();
++	const auto button = [&](const QString &text) {
++		auto *widget = new QPushButton(text, sheet);
++		layout->addWidget(widget);
++		return widget;
++	};
++	connect(button(QString::fromUtf8("扫码登录")), &QPushButton::clicked, this, [=] {
++		closeSheet();
++		StartAddAccount();
++	});
++	connect(button(QString::fromUtf8("手机号登录")), &QPushButton::clicked, this, [=] {
++		closeSheet();
++		StartPhoneLogin();
++	});
++
++	auto *secret = new QPlainTextEdit(sheet);
++	secret->setPlaceholderText(QString::fromUtf8(
++		"密钥：session 字符串，或 512 位十六进制，或 base64"));
++	secret->setFixedHeight(72);
++	auto *userId = new QLineEdit(sheet);
++	userId->setPlaceholderText(QString::fromUtf8("用户 ID，session 字符串可以不填"));
++	auto *dc = new QLineEdit(sheet);
++	dc->setPlaceholderText(QString::fromUtf8("数据中心 1-5，不知道就填 2"));
++	dc->setText(u"2"_q);
++	layout->addWidget(secret);
++	layout->addWidget(userId);
++	layout->addWidget(dc);
++	connect(button(QString::fromUtf8("用密钥登录")), &QPushButton::clicked, this, [=] {
++		const auto dcId = dc->text().trimmed().toInt();
++		const auto text = secret->toPlainText();
++		const auto id = userId->text();
++		closeSheet();
++		LoginBySecret(text, id, dcId);
++	});
++	connect(button(QString::fromUtf8("导入 tdata 文件夹")), &QPushButton::clicked, this, [=] {
++		closeSheet();
++		QTimer::singleShot(0, &Core::App(), [] {
++			ChooseAndImportAccountFolder(nullptr, &Core::App().domain());
++		});
++	});
++	connect(button(QString::fromUtf8("导入 zip 压缩包")), &QPushButton::clicked, this, [=] {
++		closeSheet();
++		QTimer::singleShot(0, &Core::App(), [] {
++			ChooseAndImportAccountPack(nullptr, &Core::App().domain());
++		});
++	});
++	connect(button(QString::fromUtf8("关闭")), &QPushButton::clicked, this, closeSheet);
++
++	sheet->setGeometry(
++		std::max(0, (host->width() - 360) / 2),
++		std::max(0, (host->height() - 520) / 2),
++		360,
++		520);
++	sheet->show();
++	sheet->raise();
 +}
 +
 +void AccountRail::scheduleRebuild() {
@@ -843,7 +888,7 @@ index 0000000..16ae97e
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..55457ae
+index 0000000..a6cefae
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
 @@ -0,0 +1,69 @@
@@ -892,7 +937,7 @@ index 0000000..55457ae
 +	void noteUnread(not_null<Main::Account*> account);
 +	void saveOrder();
 +	void tickBounce();
-+	void showImportChoices();
++	void showLoginSheet();
 +
 +	const not_null<Window::SessionController*> _controller;
 +	bool _rebuilding = false;
@@ -918,10 +963,10 @@ index 0000000..55457ae
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..afdede2
+index 0000000..a2df5f5
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,988 @@
+@@ -0,0 +1,1023 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -956,6 +1001,7 @@ index 0000000..afdede2
 +#include "window/window_session_controller.h"
 +
 +#include <algorithm>
++#include <set>
 +
 +#include <QtCore/QCoreApplication>
 +#include <QtCore/QDateTime>
@@ -1632,8 +1678,47 @@ index 0000000..afdede2
 +
 +bool FileDialogActiveFlag = false;
 +int AccountSwitchDepth = 0;
++int PendingLoginPoint = 0;
++std::set<Main::Account*> HeldAccounts;
 +
 +} // namespace
++
++void HoldAccount(not_null<Main::Account*> account) {
++	HeldAccounts.insert(account.get());
++}
++
++void ReleaseAccount(not_null<Main::Account*> account) {
++	HeldAccounts.erase(account.get());
++}
++
++bool AccountOnHold(not_null<Main::Account*> account) {
++	return HeldAccounts.find(account.get()) != HeldAccounts.end();
++}
++
++int TakeLoginEnterPoint() {
++	const auto point = PendingLoginPoint;
++	PendingLoginPoint = 0;
++	return point;
++}
++
++void StartLogin(int point) {
++	PendingLoginPoint = point;
++	crl::on_main(&Core::App(), [] {
++		if (!Core::App().domain().started()) {
++			return;
++		}
++		auto &domain = Core::App().domain();
++		domain.removeRedundantAccounts();
++		if (int(domain.accounts().size()) >= domain.maxAccounts()) {
++			Ui::Toast::Show(QString::fromUtf8(
++				"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
++			return;
++		}
++		// Official add-account opens a second window. Replacing the
++		// logged-in window is what hid the app on the QR back button.
++		domain.addActivated(MTP::Environment{}, true);
++	});
++}
 +
 +void SetFileDialogActive(bool active) {
 +	FileDialogActiveFlag = active;
@@ -1660,6 +1745,17 @@ index 0000000..afdede2
 +void ReturnToAuthedAccount(
 +		not_null<Window::Controller*> controller,
 +		not_null<Main::Account*> account) {
++	if (!controller->isPrimary()) {
++		crl::on_main(&Core::App(), [=] {
++			if (Core::App().separateWindowFor(not_null(&controller->account()))) {
++				Core::App().closeWindow(controller);
++			}
++			if (Core::App().domain().started()) {
++				Core::App().domain().removeRedundantAccounts();
++			}
++		});
++		return;
++	}
 +	if (ReturnScheduled || !account->sessionExists()) {
 +		return;
 +	}
@@ -1691,27 +1787,11 @@ index 0000000..afdede2
 +}
 +
 +void StartAddAccount() {
-+	crl::on_main(&Core::App(), [] {
-+		if (!Core::App().domain().started()) {
-+			return;
-+		}
-+		auto &domain = Core::App().domain();
-+		domain.removeRedundantAccounts();
-+		if (int(domain.accounts().size()) >= domain.maxAccounts()) {
-+			Ui::Toast::Show(QString::fromUtf8(
-+				"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
-+			return;
-+		}
-+		const auto window = Core::App().activePrimaryWindow();
-+		if (window) {
-+			Core::App().setActivePrimaryWindow(window);
-+		}
-+		// Official path: activate the new account, then the window shows
-+		// the QR intro and destroys the old main widget. Keeping both
-+		// widgets alive is what quit the process on click.
-+		BeginAccountSwitch();
-+		domain.addActivated(MTP::Environment{});
-+	});
++	StartLogin(0);
++}
++
++void StartPhoneLogin() {
++	StartLogin(1);
 +}
 +
 +QString FindBin(const QString &name) {
@@ -1912,10 +1992,10 @@ index 0000000..afdede2
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..4fffcb3
+index 0000000..aa5b116
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,58 @@
 +#pragma once
 +
 +namespace Main {
@@ -1934,6 +2014,13 @@ index 0000000..4fffcb3
 +void StartBotIfEnabled();
 +
 +void StartAddAccount();
++void StartPhoneLogin();
++// 0 = QR, 1 = phone. Consumed by the next intro window.
++[[nodiscard]] int TakeLoginEnterPoint();
++
++void HoldAccount(not_null<Main::Account*> account);
++void ReleaseAccount(not_null<Main::Account*> account);
++[[nodiscard]] bool AccountOnHold(not_null<Main::Account*> account);
 +
 +void SetFileDialogActive(bool active);
 +[[nodiscard]] bool FileDialogActive();
@@ -1969,10 +2056,10 @@ index 0000000..4fffcb3
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
-index 0000000..eab8cef
+index 0000000..d4cb2df
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.cpp
-@@ -0,0 +1,557 @@
+@@ -0,0 +1,619 @@
 +#include "custom/custom_export.h"
 +
 +#include "custom/custom_control.h"
@@ -1988,7 +2075,10 @@ index 0000000..eab8cef
 +#include "mainwindow.h"
 +#include "mtproto/mtp_instance.h"
 +#include "mtproto/mtproto_auth_key.h"
++#include "base/random.h"
++#include "config.h"
 +#include "storage/details/storage_file_utilities.h"
++#include "storage/details/storage_settings_scheme.h"
 +#include "storage/localstorage.h"
 +#include "styles/style_boxes.h"
 +#include "styles/style_layers.h"
@@ -2003,6 +2093,7 @@ index 0000000..eab8cef
 +#include <array>
 +#include <cstring>
 +
++#include <QtCore/QDataStream>
 +#include <QtCore/QDateTime>
 +#include <QtCore/QDir>
 +#include <QtCore/QDirIterator>
@@ -2162,6 +2253,7 @@ index 0000000..eab8cef
 +	QJsonObject json;
 +	QString twoFa;
 +	qint32 dcId = 2;
++	quint64 userId = 0;
 +	QByteArray authKey;
 +};
 +
@@ -2182,6 +2274,7 @@ index 0000000..eab8cef
 +		return out;
 +	}
 +	const auto user = account->session().user();
++	out.userId = peerToUser(user->id).bare;
 +	out.phone = user->phone();
 +	const auto userId = QString::number(peerToUser(user->id).bare);
 +	const auto stored = indexRoot.value(userId).toObject();
@@ -2249,6 +2342,61 @@ index 0000000..eab8cef
 +	return out;
 +}
 +
++bool WritePortableTdata(
++		const QString &tdata,
++		qint32 dcId,
++		quint64 userId,
++		const QByteArray &authKey) {
++	using namespace Storage::details;
++	if (authKey.size() != 256 || userId == 0 || dcId < 1) {
++		return false;
++	}
++	QDir().mkpath(tdata);
++	auto salt = QByteArray(LocalEncryptSaltSize, Qt::Uninitialized);
++	base::RandomFill(salt.data(), salt.size());
++	const auto passcodeKey = CreateLocalKey(QByteArray(), salt);
++	auto localBytes = MTP::AuthKey::Data{ { gsl::byte{} } };
++	base::RandomFill(localBytes.data(), localBytes.size());
++	const auto localKey = std::make_shared<MTP::AuthKey>(localBytes);
++
++	EncryptedDescriptor keyInner(sizeof(MTP::AuthKey::Data));
++	localKey->write(keyInner.stream);
++	const auto keyEncrypted = PrepareEncrypted(keyInner, passcodeKey);
++
++	EncryptedDescriptor info(sizeof(qint32) * 3);
++	info.stream << qint32(1) << qint32(0) << qint32(0);
++	const auto infoEncrypted = PrepareEncrypted(info, localKey);
++
++	const auto root = tdata.endsWith(u'/') ? tdata : (tdata + u'/');
++	{
++		FileWriteDescriptor key(u"key_data"_q, root, true);
++		key.writeData(salt);
++		key.writeData(keyEncrypted);
++		key.writeData(infoEncrypted);
++	}
++
++	auto serialized = QByteArray();
++	{
++		QDataStream stream(&serialized, QIODevice::WriteOnly);
++		stream.setVersion(QDataStream::Qt_5_1);
++		auto keyData = MTP::AuthKey::Data{ { gsl::byte{} } };
++		memcpy(keyData.data(), authKey.constData(), 256);
++		const auto mtpKey = std::make_shared<MTP::AuthKey>(
++			MTP::AuthKey::Type::ReadFromFile,
++			dcId,
++			keyData);
++		stream << quint64(~quint64(0)) << quint64(userId) << qint32(dcId);
++		stream << qint32(1) << qint32(dcId);
++		mtpKey->write(stream);
++		stream << qint32(0);
++	}
++	EncryptedDescriptor mtp(sizeof(quint32) + uint32(serialized.size()) + 16);
++	mtp.stream << quint32(dbiMtpAuthorization) << serialized;
++	FileWriteDescriptor mtpFile(u"D877F783D5D3EF8C"_q, root, true);
++	mtpFile.writeEncrypted(mtp, localKey);
++	return true;
++}
++
 +bool WriteOneFolder(const PreparedAccount &one, const QString &root) {
 +	const auto folder = root + '/' + one.folderName;
 +	const auto tdata = folder + "/tdata";
@@ -2274,17 +2422,18 @@ index 0000000..eab8cef
 +			one.authKey);
 +	}
 +
-+	const auto srcBase = cWorkingDir() + u"tdata/"_q;
-+	CopyExisting(srcBase + "key_datas", tdata + "/key_datas");
-+	if (!QFile::exists(tdata + "/key_datas")) {
-+		CopyExisting(srcBase + "key_data", tdata + "/key_datas");
-+	}
-+
-+	const auto srcHash = AccountFileHash(one.index);
-+	CopyDir(srcBase + srcHash, tdata + '/' + kTemplateHash);
-+	if (!CopyExisting(srcBase + srcHash + 's', tdata + '/' + kTemplateHash + 's')) {
-+		if (!CopyExisting(srcBase + srcHash + '0', tdata + '/' + kTemplateHash + 's')) {
-+			CopyExisting(srcBase + srcHash + '1', tdata + '/' + kTemplateHash + 's');
++	if (!WritePortableTdata(tdata, one.dcId, one.userId, one.authKey)) {
++		const auto srcBase = cWorkingDir() + u"tdata/"_q;
++		CopyExisting(srcBase + "key_datas", tdata + "/key_datas");
++		if (!QFile::exists(tdata + "/key_datas")) {
++			CopyExisting(srcBase + "key_data", tdata + "/key_datas");
++		}
++		const auto srcHash = AccountFileHash(one.index);
++		CopyDir(srcBase + srcHash, tdata + '/' + kTemplateHash);
++		if (!CopyExisting(srcBase + srcHash + 's', tdata + '/' + kTemplateHash + 's')) {
++			if (!CopyExisting(srcBase + srcHash + '0', tdata + '/' + kTemplateHash + 's')) {
++				CopyExisting(srcBase + srcHash + '1', tdata + '/' + kTemplateHash + 's');
++			}
 +		}
 +	}
 +	return QDir(folder).exists();
@@ -2571,10 +2720,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..92b7b7d
+index 0000000..718b94e
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,958 @@
+@@ -0,0 +1,1090 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -2585,7 +2734,9 @@ index 0000000..92b7b7d
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
++#include "main/main_session_settings.h"
 +#include "config.h"
++#include "mtproto/sender.h"
 +#include "storage/details/storage_file_utilities.h"
 +#include "storage/details/storage_settings_scheme.h"
 +#include "storage/localstorage.h"
@@ -2611,6 +2762,7 @@ index 0000000..92b7b7d
 +#include <QtCore/QProcess>
 +#include <QtCore/QRegularExpression>
 +#include <QtCore/QStandardPaths>
++#include <QtCore/QTimer>
 +#include <QtCore/QTemporaryDir>
 +#include <QtCore/QUrl>
 +#include <QtWidgets/QFileDialog>
@@ -2745,7 +2897,7 @@ index 0000000..92b7b7d
 +		quint64 userId,
 +		const void *bytes,
 +		int size) {
-+	if (dcId <= 0 || userId == 0 || !bytes || size != 256) {
++	if (dcId <= 0 || !bytes || size != 256) {
 +		return;
 +	}
 +	out->dcId = dcId;
@@ -2975,6 +3127,16 @@ index 0000000..92b7b7d
 +	// Do not walk every other file. Those are settings maps, and feeding
 +	// them to the settings reader aborts the running client.
 +	addBase(u"D877F783D5D3EF8C"_q);
++	const auto listed = QDir(root).entryList(QDir::Files);
++	for (const auto &name : listed) {
++		auto base = name;
++		if (base.endsWith(u's') || base.endsWith(u'0') || base.endsWith(u'1')) {
++			base.chop(1);
++		}
++		if (base.size() == 16) {
++			addBase(base);
++		}
++	}
 +	for (const auto &base : bases) {
 +		auto one = ImportedAuth();
 +		if (!ReadOneMtpFile(base, root, localKey, &one)) {
@@ -3169,7 +3331,7 @@ index 0000000..92b7b7d
 +std::vector<ImportedAuth> AuthsFromFolder(const QString &folder, bool *locked) {
 +	auto result = std::vector<ImportedAuth>();
 +	const auto push = [&](ImportedAuth auth) {
-+		if (auth.authKey.size() != 256 || !auth.userId) {
++		if (auth.authKey.size() != 256) {
 +			return;
 +		}
 +		if (auth.dcId <= 0) {
@@ -3311,6 +3473,54 @@ index 0000000..92b7b7d
 +	return imported;
 +}
 +
++void ResolveSelf(not_null<Main::Account*> account) {
++	HoldAccount(account);
++	const auto sender = std::make_shared<MTP::Sender>(&account->mtp());
++	sender->request(MTPusers_GetUsers(
++		MTP_vector<MTPInputUser>(1, MTP_inputUserSelf())
++	)).done([=](const MTPVector<MTPUser> &result) {
++		auto alive = false;
++		if (Core::App().domain().started()) {
++			for (const auto &[index, existing] : Core::App().domain().accounts()) {
++				if (existing.get() == account.get()) {
++					alive = true;
++					break;
++				}
++			}
++		}
++		if (!alive) {
++			return;
++		}
++		ReleaseAccount(account);
++		auto id = quint64();
++		for (const auto &user : result.v) {
++			user.match([&](const MTPDuser &data) {
++				if (data.is_self()) {
++					id = quint64(data.vid().v);
++				}
++			}, [](const MTPDuserEmpty &) {
++			});
++		}
++		if (!id) {
++			Ui::Toast::Show(QString::fromUtf8("服务器没有返回这个密钥对应的帐号"));
++			return;
++		}
++		if (account->sessionExists()) {
++			return;
++		}
++		account->setSessionUserId(UserId(id));
++		account->createSession(
++			UserId(id),
++			QByteArray(),
++			0,
++			std::make_unique<Main::SessionSettings>());
++		account->domain().notifyAccountsChanged();
++	}).fail([=](const MTP::Error &error) {
++		ReleaseAccount(account);
++		Ui::Toast::Show(QString::fromUtf8("密钥连接失败: ") + error.type());
++	}).send();
++}
++
 +void ApplyImported(
 +		const std::shared_ptr<ScanResult> &scan,
 +		int index,
@@ -3346,13 +3556,34 @@ index 0000000..92b7b7d
 +		return;
 +	}
 +	const auto &auth = scan->auths[index];
-+	if (domain.importAuthorized(
++	auto duplicate = false;
++	if (auth.userId != 0) {
++		for (const auto &[accountIndex, existing] : domain.accounts()) {
++			(void)accountIndex;
++			if (existing->sessionExists()
++				&& existing->session().userId().bare == auth.userId) {
++				duplicate = true;
++				break;
++			}
++		}
++	}
++	if (duplicate) {
++		if (error.isEmpty()) {
++			error = QString::fromUtf8("这个号已经在列表里");
++		}
++	} else if (domain.importAuthorized(
 +			auth.dcId,
 +			auth.userId,
 +			auth.authKey,
 +			false)) {
 +		SaveIndexEntry(auth);
 +		++imported;
++		const auto account = domain.accounts().back().account.get();
++		if (!account->sessionExists()) {
++			ResolveSelf(account);
++		}
++	} else if (error.isEmpty()) {
++		error = QString::fromUtf8("这个 tdata 里的密钥没有接上");
 +	}
 +	crl::on_main(&Core::App(), [=] {
 +		ApplyImported(scan, index + 1, imported, error);
@@ -3502,17 +3733,23 @@ index 0000000..92b7b7d
 +		"QLineEdit,QTreeView,QListView,QComboBox{background:#ffffff;color:#111111;}"
 +		"QPushButton{background:#e8e8e8;color:#111111;padding:4px 12px;}");
 +	QObject::connect(dialog, &QDialog::finished, &Core::App(), [=](int code) {
-+		if (code != QDialog::Accepted) {
-+			ReleaseFileDialog();
-+			return;
++		auto path = QString();
++		if (code == QDialog::Accepted) {
++			const auto files = dialog->selectedFiles();
++			if (!files.isEmpty()) {
++				path = files.front();
++			}
 +		}
-+		const auto files = dialog->selectedFiles();
-+		if (files.isEmpty() || files.front().isEmpty()) {
++		dialog->deleteLater();
++		QTimer::singleShot(0, &Core::App(), [=] {
 +			ReleaseFileDialog();
-+			return;
-+		}
-+		const auto path = files.front();
-+		crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
++			if (path.isEmpty()) {
++				return;
++			}
++			QTimer::singleShot(0, &Core::App(), [=] {
++				FinishImport(path, domain);
++			});
++		});
 +	});
 +	dialog->show();
 +	dialog->raise();
@@ -3532,13 +3769,57 @@ index 0000000..92b7b7d
 +	OpenImportDialog(true, domain);
 +}
 +
++void LoginBySecret(
++		const QString &secret,
++		const QString &userIdText,
++		qint32 dcId) {
++	auto text = secret.trimmed();
++	text.remove(QRegularExpression(u"\\s"_q));
++	if (text.isEmpty()) {
++		Ui::Toast::Show(QString::fromUtf8("先贴上密钥或 session 字符串"));
++		return;
++	}
++	ImportedAuth auth;
++	if (!ReadStringSession(text, &auth.dcId, &auth.authKey)) {
++		auto hex = text;
++		if (hex.startsWith(u"0x"_q, Qt::CaseInsensitive)) {
++			hex.remove(0, 2);
++		}
++		if (hex.size() == 512) {
++			auth.authKey = QByteArray::fromHex(hex.toLatin1());
++		} else {
++			auth.authKey = QByteArray::fromBase64(text.toLatin1());
++			if (auth.authKey.size() != 256) {
++				auth.authKey = QByteArray::fromBase64(
++					text.toLatin1(),
++					QByteArray::Base64UrlEncoding);
++			}
++		}
++		auth.dcId = dcId;
++	}
++	if (auth.authKey.size() != 256) {
++		Ui::Toast::Show(QString::fromUtf8(
++			"密钥格式不对。要 256 字节，或 Telethon session 字符串"));
++		return;
++	}
++	if (auth.dcId < 1 || auth.dcId > 5) {
++		auth.dcId = (dcId >= 1 && dcId <= 5) ? dcId : 2;
++	}
++	auth.userId = userIdText.trimmed().toULongLong();
++	auto scan = std::make_shared<ScanResult>();
++	scan->auths.push_back(std::move(auth));
++	QTimer::singleShot(0, &Core::App(), [scan] {
++		ApplyImported(scan, 0, 0, QString());
++	});
++}
++
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.h b/Telegram/SourceFiles/custom/custom_import.h
 new file mode 100644
-index 0000000..b1d0e3d
+index 0000000..3462cd3
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.h
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,55 @@
 +#pragma once
 +
 +#include "base/basic_types.h"
@@ -3574,6 +3855,10 @@ index 0000000..b1d0e3d
 +void ChooseAndImportAccountFolder(
 +	QWidget *parent,
 +	not_null<Main::Domain*> domain);
++void LoginBySecret(
++	const QString &secret,
++	const QString &userIdText,
++	qint32 dcId);
 +
 +int ImportAccountPack(
 +	const QString &path,
@@ -4184,7 +4469,7 @@ index 511f754..4ea59cc 100644
  	Ui::Animations::Simple _nextShownAnimation;
  
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
-index efd667d..80ff046 100644
+index efd667d..d8043cd 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
 +++ b/Telegram/SourceFiles/main/main_domain.cpp
 @@ -13,6 +13,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4223,7 +4508,7 @@ index efd667d..80ff046 100644
  	} else {
  		Assert(!started());
  	}
-@@ -315,6 +326,63 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+@@ -315,6 +326,66 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
  	return account;
  }
  
@@ -4233,7 +4518,7 @@ index efd667d..80ff046 100644
 +		const QByteArray &authKey,
 +		bool notify) {
 +	Expects(started());
-+	if (authKey.size() != 256 || userId == 0) {
++	if (authKey.size() != 256) {
 +		return false;
 +	}
 +	if (_accounts.size() >= kMaxAccounts
@@ -4241,7 +4526,8 @@ index efd667d..80ff046 100644
 +		return false;
 +	}
 +	for (const auto &[index, existing] : _accounts) {
-+		if (existing->sessionExists()
++		if (userId != 0
++			&& existing->sessionExists()
 +			&& existing->session().userId().bare == userId) {
 +			return false;
 +		}
@@ -4264,7 +4550,9 @@ index efd667d..80ff046 100644
 +	});
 +	const auto account = _accounts.back().account.get();
 +	account->setMtpMainDcId(dcId);
-+	account->setSessionUserId(UserId(userId));
++	if (userId != 0) {
++		account->setSessionUserId(UserId(userId));
++	}
 +	auto keyData = MTP::AuthKey::Data{ { gsl::byte{} } };
 +	memcpy(keyData.data(), authKey.constData(), 256);
 +	account->setLegacyMtpKey(std::make_shared<MTP::AuthKey>(
@@ -4287,7 +4575,7 @@ index efd667d..80ff046 100644
  void Domain::addActivated(MTP::Environment environment, bool newWindow) {
  	const auto added = [&](not_null<Main::Account*> account) {
  		if (newWindow) {
-@@ -343,7 +411,16 @@ void Domain::watchSession(not_null<Account*> account) {
+@@ -343,7 +414,17 @@ void Domain::watchSession(not_null<Account*> account) {
  	account->sessionValue(
  	) | rpl::filter([=](Session *session) {
  		return session != nullptr;
@@ -4301,11 +4589,22 @@ index efd667d..80ff046 100644
 +			session->saveSettingsDelayed();
 +			session->updates().updateOnline();
 +		});
++		_accountsChanges.fire({});
 +
  		session->data().unreadBadgeChanges(
  		) | rpl::on_next([=] {
  			scheduleUpdateUnreadBadge();
-@@ -516,14 +593,15 @@ void Domain::scheduleWriteAccounts() {
+@@ -429,7 +510,8 @@ void Domain::removeRedundantAccounts() {
+ 	const auto was = _accounts.size();
+ 	for (auto i = _accounts.begin(); i != _accounts.end();) {
+ 		if (Core::App().separateWindowFor(not_null(i->account.get()))
+-			|| i->account->sessionExists()) {
++			|| i->account->sessionExists()
++			|| Custom::AccountOnHold(i->account.get())) {
+ 			++i;
+ 			continue;
+ 		}
+@@ -516,14 +598,15 @@ void Domain::scheduleWriteAccounts() {
  }
  
  int Domain::maxAccounts() const {
@@ -5391,6 +5690,29 @@ index 5fa9f81..ff2d483 100644
  		AddSkip(container);
  	}
  
+diff --git a/Telegram/SourceFiles/window/window_controller.cpp b/Telegram/SourceFiles/window/window_controller.cpp
+index aa548de..92791c1 100644
+--- a/Telegram/SourceFiles/window/window_controller.cpp
++++ b/Telegram/SourceFiles/window/window_controller.cpp
+@@ -20,6 +20,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "main/main_app_config.h"
+ #include "media/view/media_view_open_common.h"
+ #include "lang/lang_keys.h"
++#include "custom/custom_control.h"
+ #include "intro/intro_widget.h"
+ #include "mtproto/mtproto_config.h"
+ #include "ui/toast/toast.h"
+@@ -405,7 +406,9 @@ void Controller::clearSetupEmailLock() {
+ void Controller::setupIntro(
+ 		Main::Account *accountBeforeIntro,
+ 		QPixmap oldContentCache) {
+-	const auto point = Core::App().domain().maybeLastOrSomeAuthedAccount()
++	const auto point = (Custom::TakeLoginEnterPoint() == 1)
++		? Intro::EnterPoint::Phone
++		: Core::App().domain().maybeLastOrSomeAuthedAccount()
+ 		? Intro::EnterPoint::Qr
+ 		: Intro::EnterPoint::Start;
+ 	_widget.setupIntro(point, accountBeforeIntro, std::move(oldContentCache));
 diff --git a/Telegram/SourceFiles/window/window_filters_menu.cpp b/Telegram/SourceFiles/window/window_filters_menu.cpp
 index cbb6fba..ef51e3f 100644
 --- a/Telegram/SourceFiles/window/window_filters_menu.cpp
