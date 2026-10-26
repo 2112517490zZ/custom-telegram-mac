@@ -170,6 +170,80 @@ index 2e4c306..04958e3 100644
  	void moveBottomRight(int bottom, int right);
  	void moveTopRight(int top, int right);
  	void setDesiredHeightValues(
+diff --git a/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp b/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp
+index 12509a2..0f1aa96 100644
+--- a/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp
++++ b/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp
+@@ -11,6 +11,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "ui/ui_utility.h"
+ #include "window/window_session_controller.h"
+ 
++#include <QtCore/QPointer>
++#include <QtCore/QTimer>
++#include <QtWidgets/QPushButton>
++
++#include <algorithm>
++
+ namespace ChatHelpers {
+ 
+ object_ptr<Window::SectionWidget> TabbedMemento::createWidget(
+@@ -39,6 +45,24 @@ TabbedSection::TabbedSection(
+ 	_selector->setAfterShownCallback(nullptr);
+ 	_selector->setBeforeHidingCallback(nullptr);
+ 
++	_close = new QPushButton(QString::fromUtf8("收起"), this);
++	_close->setCursor(Qt::PointingHandCursor);
++	_close->setStyleSheet(
++		"QPushButton{background:#2b5278;color:#fff;border:0;"
++		"border-radius:8px;font-size:12px;padding:0 8px;}"
++		"QPushButton:hover{background:#3d6d99;}");
++	_close->show();
++	_close->raise();
++	QObject::connect(_close, &QPushButton::clicked, this, [=] {
++		const auto weak = QPointer<TabbedSection>(this);
++		QTimer::singleShot(0, this, [=] {
++			if (!weak) {
++				return;
++			}
++			weak->controller()->closeThirdSection();
++		});
++	});
++
+ 	setAttribute(Qt::WA_OpaquePaintEvent, true);
+ }
+ 
+@@ -52,6 +76,10 @@ void TabbedSection::afterShown() {
+ 
+ void TabbedSection::resizeEvent(QResizeEvent *e) {
+ 	_selector->setGeometry(rect());
++	if (_close) {
++		_close->setGeometry(std::max(0, width() - 72), 8, 64, 28);
++		_close->raise();
++	}
+ }
+ 
+ void TabbedSection::showFinishedHook() {
+diff --git a/Telegram/SourceFiles/chat_helpers/tabbed_section.h b/Telegram/SourceFiles/chat_helpers/tabbed_section.h
+index 0d32197..156ff74 100644
+--- a/Telegram/SourceFiles/chat_helpers/tabbed_section.h
++++ b/Telegram/SourceFiles/chat_helpers/tabbed_section.h
+@@ -10,6 +10,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "window/section_widget.h"
+ #include "window/section_memento.h"
+ 
++class QPushButton;
++
+ namespace ChatHelpers {
+ 
+ class TabbedSelector;
+@@ -56,6 +58,7 @@ protected:
+ 
+ private:
+ 	const not_null<TabbedSelector*> _selector;
++	QPushButton *_close = nullptr;
+ 
+ };
+ 
 diff --git a/Telegram/SourceFiles/core/enhanced_settings.cpp b/Telegram/SourceFiles/core/enhanced_settings.cpp
 index 82ea11a..cd52752 100644
 --- a/Telegram/SourceFiles/core/enhanced_settings.cpp
@@ -192,6 +266,34 @@ index 82ea11a..cd52752 100644
  
  		auto document = QJsonDocument();
  		document.setObject(settings);
+diff --git a/Telegram/SourceFiles/core/file_utilities.cpp b/Telegram/SourceFiles/core/file_utilities.cpp
+index f2dcb04..ccca52a 100644
+--- a/Telegram/SourceFiles/core/file_utilities.cpp
++++ b/Telegram/SourceFiles/core/file_utilities.cpp
+@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ #include "base/platform/base_platform_file_utilities.h"
+ #include "platform/platform_file_utilities.h"
+ #include "core/application.h"
++#include "custom/custom_control.h"
+ #include "base/unixtime.h"
+ #include "ui/delayed_activation.h"
+ #include "ui/chat/attach/attach_extensions.h"
+@@ -385,9 +386,12 @@ bool GetDefault(
+ 	}
+ 	QString file;
+ 
+-	const auto resolvedParent = (parent && parent->window()->isVisible())
+-		? parent->window()
+-		: Core::App().getFileDialogParent();
++	// A sheet attached to the main window makes macOS close that window.
++	const auto resolvedParent = Custom::FileDialogActive()
++		? static_cast<QWidget*>(nullptr)
++		: ((parent && parent->window()->isVisible())
++			? parent->window()
++			: Core::App().getFileDialogParent());
+ 	Core::App().notifyFileDialogShown(true);
+ 	const auto guard = gsl::finally([] {
+ 		Core::App().notifyFileDialogShown(false);
 diff --git a/Telegram/SourceFiles/core/shortcuts.cpp b/Telegram/SourceFiles/core/shortcuts.cpp
 index ccad62f..2a784b0 100644
 --- a/Telegram/SourceFiles/core/shortcuts.cpp
@@ -255,10 +357,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..faff977
+index 0000000..9017d3b
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,436 @@
+@@ -0,0 +1,480 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -283,8 +385,8 @@ index 0000000..faff977
 +#include <QtGui/QDropEvent>
 +#include <QtGui/QMouseEvent>
 +#include <QtGui/QPainter>
++#include <QtWidgets/QFrame>
 +#include <QtWidgets/QLineEdit>
-+#include <QtWidgets/QMenu>
 +#include <QtWidgets/QPushButton>
 +#include <QtWidgets/QScrollArea>
 +#include <QtWidgets/QVBoxLayout>
@@ -437,19 +539,7 @@ index 0000000..faff977
 +		StartAddAccount();
 +	});
 +	connect(_import, &QPushButton::clicked, this, [=] {
-+		auto menu = new QMenu(_import);
-+		menu->setAttribute(Qt::WA_DeleteOnClose);
-+		menu->addAction(QString::fromUtf8("文件夹"), [=] {
-+			ChooseAndImportAccountFolder(
-+				nullptr,
-+				&Core::App().domain());
-+		});
-+		menu->addAction(QString::fromUtf8("压缩包"), [=] {
-+			ChooseAndImportAccountPack(
-+				nullptr,
-+				&Core::App().domain());
-+		});
-+		menu->popup(_import->mapToGlobal(QPoint(0, _import->height())));
++		showImportChoices();
 +	});
 +	connect(_export, &QPushButton::clicked, this, [=] {
 +		crl::on_main(this, [=] {
@@ -463,6 +553,54 @@ index 0000000..faff977
 +		scheduleRebuild();
 +	}, lifetime());
 +	rebuild();
++}
++
++void AccountRail::showImportChoices() {
++	if (_importChoices) {
++		_importChoices->deleteLater();
++		_importChoices = nullptr;
++		return;
++	}
++	// A native menu that opens a file panel deadlocks on Mac. This is an
++	// ordinary widget; the panel opens only after the click has returned.
++	auto *box = new QFrame(this);
++	_importChoices = box;
++	box->setStyleSheet(
++		"QFrame{background:#1f2e3d;border:1px solid #6f879b;border-radius:8px;}"
++		"QPushButton{background:transparent;color:#d7e4ef;border:0;"
++		"padding:6px;font-size:11px;}"
++		"QPushButton:hover{background:#35506a;}");
++	auto *layout = new QVBoxLayout(box);
++	layout->setContentsMargins(4, 4, 4, 4);
++	layout->setSpacing(2);
++	const auto open = [=](bool folder) {
++		box->hide();
++		box->deleteLater();
++		if (_importChoices == box) {
++			_importChoices = nullptr;
++		}
++		SetFileDialogActive(true);
++		QTimer::singleShot(0, &Core::App(), [=] {
++			if (folder) {
++				ChooseAndImportAccountFolder(
++					nullptr,
++					&Core::App().domain());
++			} else {
++				ChooseAndImportAccountPack(
++					nullptr,
++					&Core::App().domain());
++			}
++		});
++	};
++	auto *folder = new QPushButton(QString::fromUtf8("文件夹"), box);
++	auto *zip = new QPushButton(QString::fromUtf8("压缩包"), box);
++	layout->addWidget(folder);
++	layout->addWidget(zip);
++	connect(folder, &QPushButton::clicked, this, [=] { open(true); });
++	connect(zip, &QPushButton::clicked, this, [=] { open(false); });
++	box->setGeometry(6, std::max(0, _import->y() - 68), width() - 12, 64);
++	box->show();
++	box->raise();
 +}
 +
 +void AccountRail::scheduleRebuild() {
@@ -672,6 +810,14 @@ index 0000000..faff977
 +	_import->raise();
 +	_export->raise();
 +	_search->raise();
++	if (_importChoices) {
++		_importChoices->setGeometry(
++			6,
++			std::max(0, _import->y() - 68),
++			width() - 12,
++			64);
++		_importChoices->raise();
++	}
 +}
 +
 +void AccountRail::paintEvent(QPaintEvent *e) {
@@ -697,16 +843,17 @@ index 0000000..faff977
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..73c6dd8
+index 0000000..55457ae
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,69 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
 +
 +#include <map>
 +
++class QFrame;
 +class QLineEdit;
 +class QPushButton;
 +class QScrollArea;
@@ -745,6 +892,7 @@ index 0000000..73c6dd8
 +	void noteUnread(not_null<Main::Account*> account);
 +	void saveOrder();
 +	void tickBounce();
++	void showImportChoices();
 +
 +	const not_null<Window::SessionController*> _controller;
 +	bool _rebuilding = false;
@@ -754,6 +902,7 @@ index 0000000..73c6dd8
 +	QWidget *_inner = nullptr;
 +	QPushButton *_add = nullptr;
 +	QPushButton *_import = nullptr;
++	QFrame *_importChoices = nullptr;
 +	QPushButton *_export = nullptr;
 +	QTimer *_bounce = nullptr;
 +	QString _query;
@@ -769,10 +918,10 @@ index 0000000..73c6dd8
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..e095aa0
+index 0000000..19afe8c
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,956 @@
+@@ -0,0 +1,985 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1496,12 +1645,41 @@ index 0000000..e095aa0
 +
 +void BeginAccountSwitch() {
 +	++AccountSwitchDepth;
-+	crl::on_main(&Core::App(), [] {
-+		crl::on_main(&Core::App(), [] {
-+			if (AccountSwitchDepth > 0) {
-+				--AccountSwitchDepth;
-+			}
-+		});
++	// The close that Mac posts while the intro is torn down is queued
++	// behind this call. A two-turn guard expired before that close ran,
++	// and the window was then hidden to the background.
++	QTimer::singleShot(3000, &Core::App(), [] {
++		if (AccountSwitchDepth > 0) {
++			--AccountSwitchDepth;
++		}
++	});
++}
++
++bool ReturnScheduled = false;
++
++void ReturnToAuthedAccount(
++		not_null<Window::Controller*> controller,
++		not_null<Main::Account*> account) {
++	if (ReturnScheduled || !account->sessionExists()) {
++		return;
++	}
++	ReturnScheduled = true;
++	BeginAccountSwitch();
++	crl::on_main(&Core::App(), [=] {
++		if (!account->sessionExists()) {
++			ReturnScheduled = false;
++			return;
++		}
++		Core::App().setActivePrimaryWindow(controller);
++		controller->showAccount(account);
++		if (&account->domain().active() != account.get()) {
++			account->domain().activate(account);
++		}
++		const auto window = controller->widget();
++		window->show();
++		window->raise();
++		window->activateWindow();
++		ReturnScheduled = false;
 +	});
 +}
 +
@@ -1731,13 +1909,18 @@ index 0000000..e095aa0
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..ca53343
+index 0000000..4fffcb3
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,43 @@
+@@ -0,0 +1,51 @@
 +#pragma once
 +
++namespace Main {
++class Account;
++} // namespace Main
++
 +namespace Window {
++class Controller;
 +class SessionController;
 +} // namespace Window
 +
@@ -1753,6 +1936,9 @@ index 0000000..ca53343
 +[[nodiscard]] bool FileDialogActive();
 +void BeginAccountSwitch();
 +[[nodiscard]] bool AccountSwitching();
++void ReturnToAuthedAccount(
++	not_null<Window::Controller*> controller,
++	not_null<Main::Account*> account);
 +
 +[[nodiscard]] bool SendExportViaBot(const QString &zipPath, QString *error);
 +
@@ -2382,10 +2568,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..930e851
+index 0000000..9748db5
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,927 @@
+@@ -0,0 +1,933 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -2719,7 +2905,12 @@ index 0000000..930e851
 +	if (!copy.isValid() || !CopyTree(tdataDir, copy.path())) {
 +		return false;
 +	}
-+	const auto root = copy.path();
++	// QTemporaryDir::path() has no trailing slash. ReadFile joins with
++	// the bare name, so "key_data" would become ".../xxxkey_datas".
++	auto root = copy.path();
++	if (!root.endsWith(u'/')) {
++		root += u'/';
++	}
 +	FileReadDescriptor keyData;
 +	if (!ReadFile(keyData, u"key_data"_q, root)
 +		&& !ReadFile(keyData, u"key"_q, root)) {
@@ -2776,18 +2967,9 @@ index 0000000..930e851
 +		addBase(OfficialMtpFileName(0));
 +	}
 +	// Exported packs rename that same mtp file to a fixed hash.
++	// Do not walk every other file. Those are settings maps, and feeding
++	// them to the settings reader aborts the running client.
 +	addBase(u"D877F783D5D3EF8C"_q);
-+	const auto names = QDir(root).entryList(QDir::Files);
-+	for (const auto &name : names) {
-+		auto base = name;
-+		if (base.endsWith('s') || base.endsWith('0') || base.endsWith('1')) {
-+			base.chop(1);
-+		}
-+		if (base.size() < 8 || base.startsWith(u"key"_q)) {
-+			continue;
-+		}
-+		addBase(base);
-+	}
 +	for (const auto &base : bases) {
 +		auto one = ImportedAuth();
 +		if (!ReadOneMtpFile(base, root, localKey, &one)) {
@@ -3062,6 +3244,16 @@ index 0000000..930e851
 +
 +} // namespace
 +
++// Mac posts a window-close when the file panel goes away. Clearing the
++// flag in that same turn lets the close hide the app.
++void ReleaseFileDialog() {
++	crl::on_main(&Core::App(), [] {
++		crl::on_main(&Core::App(), [] {
++			SetFileDialogActive(false);
++		});
++	});
++}
++
 +void ShowImportResult(int n, const QString &error) {
 +	const auto text = n > 0
 +		? QString::fromUtf8("已导入 %1 个帐号").arg(n)
@@ -3121,7 +3313,7 @@ index 0000000..930e851
 +		QString error) {
 +	auto &domain = Core::App().domain();
 +	if (!domain.started()) {
-+		SetFileDialogActive(false);
++		ReleaseFileDialog();
 +		ShowImportResult(0, QString::fromUtf8("客户端还没准备好"));
 +		return;
 +	}
@@ -3131,7 +3323,7 @@ index 0000000..930e851
 +		} else if (error.isEmpty()) {
 +			error = QString::fromUtf8("没有可导入帐号");
 +		}
-+		SetFileDialogActive(false);
++		ReleaseFileDialog();
 +		ShowImportResult(imported, error);
 +		return;
 +	}
@@ -3144,7 +3336,7 @@ index 0000000..930e851
 +		if (imported > 0) {
 +			domain.notifyAccountsChanged();
 +		}
-+		SetFileDialogActive(false);
++		ReleaseFileDialog();
 +		ShowImportResult(imported, error);
 +		return;
 +	}
@@ -3246,7 +3438,7 @@ index 0000000..930e851
 +		}
 +		crl::on_main(&Core::App(), [scan] {
 +			if (scan->auths.empty()) {
-+				SetFileDialogActive(false);
++				ReleaseFileDialog();
 +				ShowImportResult(0, scan->error);
 +				return;
 +			}
@@ -3264,7 +3456,7 @@ index 0000000..930e851
 +		auto scan = std::make_shared<ScanResult>(ScanAccounts(path));
 +		crl::on_main(&Core::App(), [scan] {
 +			if (scan->auths.empty()) {
-+				SetFileDialogActive(false);
++				ReleaseFileDialog();
 +				ShowImportResult(0, scan->error);
 +				return;
 +			}
@@ -3284,13 +3476,13 @@ index 0000000..930e851
 +		"Zip (*.zip);;All files (*.*)",
 +		[=](const FileDialog::OpenResult &result) {
 +			if (result.paths.isEmpty()) {
-+				SetFileDialogActive(false);
++				ReleaseFileDialog();
 +				return;
 +			}
 +			const auto path = result.paths.front();
 +			crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
 +		},
-+		[=] { SetFileDialogActive(false); });
++		[=] { ReleaseFileDialog(); });
 +}
 +
 +void ChooseAndImportAccountFolder(
@@ -3303,13 +3495,13 @@ index 0000000..930e851
 +		QString(),
 +		[=](QString &&result) {
 +			if (result.isEmpty()) {
-+				SetFileDialogActive(false);
++				ReleaseFileDialog();
 +				return;
 +			}
 +			const auto path = result;
 +			crl::on_main(&Core::App(), [=] { FinishImport(path, domain); });
 +		},
-+		[=] { SetFileDialogActive(false); });
++		[=] { ReleaseFileDialog(); });
 +}
 +
 +} // namespace Custom
@@ -3832,7 +4024,7 @@ index b3e4c28..6a31ba4 100644
  		const auto globalPosition = mapToGlobal(e->pos());
  		const auto thread = _suggestions
 diff --git a/Telegram/SourceFiles/intro/intro_widget.cpp b/Telegram/SourceFiles/intro/intro_widget.cpp
-index f188e0c..3dcf524 100644
+index f188e0c..7bfa263 100644
 --- a/Telegram/SourceFiles/intro/intro_widget.cpp
 +++ b/Telegram/SourceFiles/intro/intro_widget.cpp
 @@ -36,6 +36,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -3883,7 +4075,25 @@ index f188e0c..3dcf524 100644
  }
  
  void Widget::setupNextButton() {
-@@ -881,7 +895,9 @@ void Widget::keyPressEvent(QKeyEvent *e) {
+@@ -847,7 +861,16 @@ void Widget::updateControlsGeometry() {
+ 			skip + _settings->width() + skip,
+ 			_settings->y());
+ 	}
+-	_back->moveToLeft(0, controlsTop);
++	// Traffic lights sit on this corner. A click there is the window
++	// close, which Mac turns into "hide to background".
++	const auto backLeft =
++#ifdef Q_OS_MAC
++		68
++#else
++		0
++#endif
++		;
++	_back->moveToLeft(backLeft, controlsTop);
+ 
+ 	auto nextTopTo = getStep()->contentTop() + st::introNextTop;
+ 	auto nextTop = anim::interpolate(_nextTopFrom, nextTopTo, shown);
+@@ -881,7 +904,9 @@ void Widget::keyPressEvent(QKeyEvent *e) {
  	if (_showAnimation || getStep()->animating()) return;
  
  	if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back) {
@@ -3894,7 +4104,7 @@ index f188e0c..3dcf524 100644
  			backRequested();
  		}
  	} else if (e->key() == Qt::Key_Enter
-@@ -892,21 +908,26 @@ void Widget::keyPressEvent(QKeyEvent *e) {
+@@ -892,21 +917,26 @@ void Widget::keyPressEvent(QKeyEvent *e) {
  }
  
  void Widget::backRequested() {
@@ -3914,25 +4124,37 @@ index f188e0c..3dcf524 100644
 -			Animate::Back);
 +		return;
 +	}
-+	if (Custom::AccountSwitching()) {
++	if (_leavingToAccount) {
 +		return;
- 	}
++	}
 +	const auto back = getData()->accountBeforeIntro.get();
 +	const auto controller = getData()->controller;
-+	Custom::BeginAccountSwitch();
-+	crl::on_main(&Core::App(), [=] {
-+		const auto target = (back && back->sessionExists())
-+			? back
-+			: Core::App().domain().maybeLastOrSomeAuthedAccount();
-+		if (!target || !target->sessionExists()) {
-+			return;
-+		}
-+		Core::App().setActivePrimaryWindow(controller);
-+		target->domain().activate(target);
-+	});
++	auto target = (Main::Account*)nullptr;
++	if (back && back->sessionExists()) {
++		target = back;
++	} else if (Core::App().domain().started()) {
++		target = Core::App().domain().maybeLastOrSomeAuthedAccount();
++	}
++	if (!target || !target->sessionExists() || !controller) {
++		return;
+ 	}
++	_leavingToAccount = true;
++	Custom::ReturnToAuthedAccount(controller, target);
  }
  
  Widget::~Widget() {
+diff --git a/Telegram/SourceFiles/intro/intro_widget.h b/Telegram/SourceFiles/intro/intro_widget.h
+index 511f754..4ea59cc 100644
+--- a/Telegram/SourceFiles/intro/intro_widget.h
++++ b/Telegram/SourceFiles/intro/intro_widget.h
+@@ -215,6 +215,7 @@ private:
+ 
+ 	std::unique_ptr<Window::ConnectionState> _connecting;
+ 
++	bool _leavingToAccount = false;
+ 	bool _nextShown = true;
+ 	Ui::Animations::Simple _nextShownAnimation;
+ 
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
 index efd667d..80ff046 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
@@ -4709,7 +4931,7 @@ index 82a35ec..876719e 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..b377d9b 100644
+index 8acc224..bf684d4 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
 @@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4766,7 +4988,7 @@ index 8acc224..b377d9b 100644
  void MainWindow::setupMain(
  		MsgId singlePeerShowAtMsgId,
  		QPixmap oldContentCache) {
-@@ -716,11 +740,33 @@ void MainWindow::fixOrder() {
+@@ -716,11 +740,26 @@ void MainWindow::fixOrder() {
  }
  
  void MainWindow::closeEvent(QCloseEvent *e) {
@@ -4786,14 +5008,7 @@ index 8acc224..b377d9b 100644
 +		const auto back = Core::App().domain().maybeLastOrSomeAuthedAccount();
 +		if (back && back->sessionExists()) {
 +			e->ignore();
-+			Custom::BeginAccountSwitch();
-+			crl::on_main(this, [=] {
-+				if (!back->sessionExists()) {
-+					return;
-+				}
-+				Core::App().setActivePrimaryWindow(&controller());
-+				back->domain().activate(back);
-+			});
++			Custom::ReturnToAuthedAccount(&controller(), back);
 +			return;
 +		}
 +	}
@@ -4801,7 +5016,7 @@ index 8acc224..b377d9b 100644
  		e->accept();
  		return;
  	}
-@@ -736,9 +782,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -736,9 +775,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
  		}
  		return false;
  	}();
@@ -4817,7 +5032,7 @@ index 8acc224..b377d9b 100644
  }
  
  void MainWindow::updateControlsGeometry() {
-@@ -750,6 +800,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -750,6 +793,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -4834,7 +5049,7 @@ index 8acc224..b377d9b 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
-@@ -791,4 +851,4 @@ MainWindow *wnd() {
+@@ -791,4 +844,4 @@ MainWindow *wnd() {
  		: nullptr;
  }
  
@@ -5385,105 +5600,3 @@ index e3d187f..53341a5 100644
  	[[nodiscard]] bool enoughSpaceForFilters() const;
  	[[nodiscard]] rpl::producer<bool> enoughSpaceForFiltersValue() const;
  	[[nodiscard]] rpl::producer<FilterId> activeChatsFilter() const;
-diff --git a/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp b/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp
-index 12509a2..0f1aa96 100644
---- a/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp
-+++ b/Telegram/SourceFiles/chat_helpers/tabbed_section.cpp
-@@ -11,6 +11,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
- #include "ui/ui_utility.h"
- #include "window/window_session_controller.h"
- 
-+#include <QtCore/QPointer>
-+#include <QtCore/QTimer>
-+#include <QtWidgets/QPushButton>
-+
-+#include <algorithm>
-+
- namespace ChatHelpers {
- 
- object_ptr<Window::SectionWidget> TabbedMemento::createWidget(
-@@ -39,6 +45,24 @@ TabbedSection::TabbedSection(
- 	_selector->setAfterShownCallback(nullptr);
- 	_selector->setBeforeHidingCallback(nullptr);
- 
-+	_close = new QPushButton(QString::fromUtf8("收起"), this);
-+	_close->setCursor(Qt::PointingHandCursor);
-+	_close->setStyleSheet(
-+		"QPushButton{background:#2b5278;color:#fff;border:0;"
-+		"border-radius:8px;font-size:12px;padding:0 8px;}"
-+		"QPushButton:hover{background:#3d6d99;}");
-+	_close->show();
-+	_close->raise();
-+	QObject::connect(_close, &QPushButton::clicked, this, [=] {
-+		const auto weak = QPointer<TabbedSection>(this);
-+		QTimer::singleShot(0, this, [=] {
-+			if (!weak) {
-+				return;
-+			}
-+			weak->controller()->closeThirdSection();
-+		});
-+	});
-+
- 	setAttribute(Qt::WA_OpaquePaintEvent, true);
- }
- 
-@@ -52,6 +76,10 @@ void TabbedSection::afterShown() {
- 
- void TabbedSection::resizeEvent(QResizeEvent *e) {
- 	_selector->setGeometry(rect());
-+	if (_close) {
-+		_close->setGeometry(std::max(0, width() - 72), 8, 64, 28);
-+		_close->raise();
-+	}
- }
- 
- void TabbedSection::showFinishedHook() {
-diff --git a/Telegram/SourceFiles/chat_helpers/tabbed_section.h b/Telegram/SourceFiles/chat_helpers/tabbed_section.h
-index 0d32197..156ff74 100644
---- a/Telegram/SourceFiles/chat_helpers/tabbed_section.h
-+++ b/Telegram/SourceFiles/chat_helpers/tabbed_section.h
-@@ -10,6 +10,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
- #include "window/section_widget.h"
- #include "window/section_memento.h"
- 
-+class QPushButton;
-+
- namespace ChatHelpers {
- 
- class TabbedSelector;
-@@ -56,6 +58,7 @@ protected:
- 
- private:
- 	const not_null<TabbedSelector*> _selector;
-+	QPushButton *_close = nullptr;
- 
- };
- 
-diff --git a/Telegram/SourceFiles/core/file_utilities.cpp b/Telegram/SourceFiles/core/file_utilities.cpp
-index f2dcb04..ccca52a 100644
---- a/Telegram/SourceFiles/core/file_utilities.cpp
-+++ b/Telegram/SourceFiles/core/file_utilities.cpp
-@@ -13,6 +13,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
- #include "base/platform/base_platform_file_utilities.h"
- #include "platform/platform_file_utilities.h"
- #include "core/application.h"
-+#include "custom/custom_control.h"
- #include "base/unixtime.h"
- #include "ui/delayed_activation.h"
- #include "ui/chat/attach/attach_extensions.h"
-@@ -385,9 +386,12 @@ bool GetDefault(
- 	}
- 	QString file;
- 
--	const auto resolvedParent = (parent && parent->window()->isVisible())
--		? parent->window()
--		: Core::App().getFileDialogParent();
-+	// A sheet attached to the main window makes macOS close that window.
-+	const auto resolvedParent = Custom::FileDialogActive()
-+		? static_cast<QWidget*>(nullptr)
-+		: ((parent && parent->window()->isVisible())
-+			? parent->window()
-+			: Core::App().getFileDialogParent());
- 	Core::App().notifyFileDialogShown(true);
- 	const auto guard = gsl::finally([] {
- 		Core::App().notifyFileDialogShown(false);
