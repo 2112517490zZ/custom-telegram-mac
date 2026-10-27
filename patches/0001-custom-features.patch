@@ -245,7 +245,7 @@ index 0d32197..156ff74 100644
  };
  
 diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
-index 30477ff..6aaf438 100644
+index 30477ff..be98709 100644
 --- a/Telegram/SourceFiles/core/application.cpp
 +++ b/Telegram/SourceFiles/core/application.cpp
 @@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -257,7 +257,7 @@ index 30477ff..6aaf438 100644
  #include "data/data_abstract_structure.h"
  #include "data/data_channel.h"
  #include "data/data_forum.h"
-@@ -1678,9 +1680,14 @@ void Application::closeWindow(not_null<Window::Controller*> window) {
+@@ -1678,12 +1680,20 @@ void Application::closeWindow(not_null<Window::Controller*> window) {
  	}
  	if (_lastActiveWindow == window) {
  		setLastActiveWindow(next);
@@ -273,7 +273,19 @@ index 30477ff..6aaf438 100644
  		}
  	}
  	_closingAsyncWindows.remove(window);
-@@ -1699,7 +1706,8 @@ void Application::closeWindow(not_null<Window::Controller*> window) {
++	// The destructor sends a close. Ignoring that close on macOS waits
++	// inside AppKit and the process never returns.
++	Custom::BeginWindowDestroy();
+ 	for (auto i = begin(_windows); i != end(_windows);) {
+ 		if (i->second.get() == window) {
+ 			Assert(_lastActiveWindow != window);
+@@ -1694,12 +1704,14 @@ void Application::closeWindow(not_null<Window::Controller*> window) {
+ 			++i;
+ 		}
+ 	}
++	Custom::EndWindowDestroy();
+ 	const auto account = domain().started()
+ 		? &domain().active()
  		: nullptr;
  	if (account
  		&& !_windows.contains(Window::SeparateId(account))
@@ -396,10 +408,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..1f8c79c
+index 0000000..6929284
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,535 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -407,6 +419,7 @@ index 0000000..1f8c79c
 +#include "custom/custom_control.h"
 +#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
++#include "data/data_peer_id.h"
 +#include "data/data_session.h"
 +#include "data/data_user.h"
 +#include "main/main_account.h"
@@ -793,9 +806,16 @@ index 0000000..1f8c79c
 +		const auto user = account->session().user();
 +		const auto unread = account->session().data().personalUnreadBadge();
 +		_lastUnread[account.get()] = unread;
++		auto label = user->name();
++		if (label.isEmpty()) {
++			label = user->phone();
++		}
++		if (label.isEmpty()) {
++			label = QString::number(peerToUser(user->id).bare);
++		}
 +		const auto button = new RailButton(
 +			inner,
-+			user->name().isEmpty() ? user->phone() : user->name(),
++			label,
 +			unread,
 +			account == current);
 +		button->installEventFilter(this);
@@ -1005,10 +1025,10 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..3857f02
+index 0000000..be24f39
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1052 @@
+@@ -0,0 +1,1085 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1720,6 +1740,7 @@ index 0000000..3857f02
 +
 +bool FileDialogActiveFlag = false;
 +int AccountSwitchDepth = 0;
++int WindowDestroyDepth = 0;
 +int PendingLoginPoint = 0;
 +std::set<Main::Account*> HeldAccounts;
 +
@@ -1816,45 +1837,77 @@ index 0000000..3857f02
 +				}
 +			});
 +		}
-+		if (!home || intro.get() == home) {
-+			ReturnScheduled = false;
-+			return;
-+		}
-+		// Controller::activate() calls ActivateThisProcess(), which
-+		// makeKeyAndOrderFront's the *current* window — this QR one.
-+		// Closing it after that never returns, and the app drops to
-+		// the background. Key the logged-in window by itself first,
-+		// while this window is still intact, then close this one.
-+		auto *widget = home->widget().get();
-+		widget->setWindowState(widget->windowState() & ~Qt::WindowMinimized);
-+		widget->show();
-+		widget->raise();
-+		Core::App().windowActivated(not_null<Window::Controller*>(home));
-+		widget->activateWindow();
-+		const auto homeId = home->id();
-+		const auto introId = intro->id();
-+		QTimer::singleShot(200, &Core::App(), [=] {
-+			if (const auto still = Core::App().separateWindowFor(introId)) {
-+				Core::App().closeWindow(still);
-+			}
++		const auto finish = [=] {
 +			if (Core::App().domain().started()) {
 +				Core::App().domain().removeRedundantAccounts();
 +			}
-+			if (const auto loggedIn = Core::App().separateWindowFor(homeId)) {
-+				auto *back = loggedIn->widget().get();
-+				if (!back->isVisible()) {
-+					back->show();
-+				}
-+				back->raise();
-+				back->activateWindow();
-+			}
 +			ReturnScheduled = false;
++		};
++		const auto introId = intro->id();
++		if (!home || intro.get() == home) {
++			// This window itself was swapped to the login page.
++			// Put the logged-in account back. Closing the NSWindow
++			// here is what drops the app to the background.
++			crl::on_main(&Core::App(), [=] {
++				if (const auto window = Core::App().separateWindowFor(introId)) {
++					window->showAccount(account);
++				}
++				finish();
++			});
++			return;
++		}
++		// Do not call Controller::activate or activateWindow.
++		// Both end in activateIgnoringOtherApps, and AppKit does not
++		// return from that while this login window is still key.
++		auto *widget = home->widget().get();
++		widget->setWindowState(widget->windowState() & ~Qt::WindowMinimized);
++		widget->setAttribute(Qt::WA_ShowWithoutActivating, false);
++		widget->show();
++		widget->raise();
++		if (const auto handle = widget->windowHandle()) {
++			handle->requestActivate();
++		}
++		const auto homeId = home->id();
++		crl::on_main(&Core::App(), [=] {
++			if (const auto still = Core::App().separateWindowFor(introId)) {
++				still->widget()->hide();
++			}
++			crl::on_main(&Core::App(), [=] {
++				if (const auto still = Core::App().separateWindowFor(introId)) {
++					Core::App().closeWindow(still);
++				}
++				if (const auto loggedIn = Core::App().separateWindowFor(homeId)) {
++					auto *back = loggedIn->widget().get();
++					if (!back->isVisible()) {
++						back->show();
++					}
++					back->raise();
++					if (const auto handle = back->windowHandle()) {
++						handle->requestActivate();
++					}
++				}
++				finish();
++			});
 +		});
 +	});
 +}
 +
 +bool AccountSwitching() {
 +	return AccountSwitchDepth > 0;
++}
++
++void BeginWindowDestroy() {
++	++WindowDestroyDepth;
++}
++
++void EndWindowDestroy() {
++	if (WindowDestroyDepth > 0) {
++		--WindowDestroyDepth;
++	}
++}
++
++bool WindowDestroying() {
++	return WindowDestroyDepth > 0;
 +}
 +
 +void StartAddAccount() {
@@ -2063,10 +2116,10 @@ index 0000000..3857f02
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..aa5b116
+index 0000000..9bf87db
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,61 @@
 +#pragma once
 +
 +namespace Main {
@@ -2097,6 +2150,9 @@ index 0000000..aa5b116
 +[[nodiscard]] bool FileDialogActive();
 +void BeginAccountSwitch();
 +[[nodiscard]] bool AccountSwitching();
++void BeginWindowDestroy();
++void EndWindowDestroy();
++[[nodiscard]] bool WindowDestroying();
 +void ReturnToAuthedAccount(
 +	not_null<Window::Controller*> controller,
 +	not_null<Main::Account*> account);
@@ -2791,12 +2847,13 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..46aaaaf
+index 0000000..da3a2f1
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,1171 @@
+@@ -0,0 +1,1195 @@
 +#include "custom/custom_import.h"
 +
++#include "api/api_updates.h"
 +#include "core/application.h"
 +#include "core/file_utilities.h"
 +#include "core/utils.h"
@@ -3592,7 +3649,9 @@ index 0000000..46aaaaf
 +			QByteArray(),
 +			0,
 +			std::make_unique<Main::SessionSettings>());
++		account->session().updates().getDifference();
 +		account->domain().notifyAccountsChanged();
++		account->domain().activate(account);
 +	}).fail([=](const MTP::Error &error) {
 +		ReleaseAccount(account);
 +		Ui::Toast::Show(QString::fromUtf8("密钥连接失败: ") + error.type());
@@ -3613,6 +3672,27 @@ index 0000000..46aaaaf
 +	if (index >= int(scan->auths.size())) {
 +		if (imported > 0) {
 +			domain.notifyAccountsChanged();
++			const auto added = domain.accounts().back().account.get();
++			if (added->sessionExists()) {
++				crl::on_main(&Core::App(), [=] {
++					if (!Core::App().domain().started()) {
++						return;
++					}
++					auto *alive = (Main::Account*)nullptr;
++					for (const auto &[index, existing] : Core::App().domain().accounts()) {
++						(void)index;
++						if (existing.get() == added) {
++							alive = existing.get();
++							break;
++						}
++					}
++					if (!alive || !alive->sessionExists()) {
++						return;
++					}
++					alive->session().updates().getDifference();
++					alive->domain().activate(alive);
++				});
++			}
 +		} else if (error.isEmpty()) {
 +			error = QString::fromUtf8("没有可导入帐号");
 +		}
@@ -3814,17 +3894,16 @@ index 0000000..46aaaaf
 +}
 +
 +void OpenImportDialog(bool folder, not_null<Main::Domain*> domain) {
-+	// QFileDialog on Mac enters NSOpenPanel and that nested loop never
-+	// returns, even with DontUseNativeDialog. Browse with our own list.
++	// QFileDialog enters NSOpenPanel and that nested loop never returns.
++	// A Qt::Tool window also becomes key and AppKit locks the process.
++	// This list is a child of the main window, same as the login sheet.
 +	const auto window = Core::App().activePrimaryWindow();
 +	if (!window) {
 +		Ui::Toast::Show(QString::fromUtf8("没有可用的主窗口"));
 +		return;
 +	}
 +	auto *host = window->widget().get();
-+	// A child of the session view sits under the chat widgets, so the
-+	// click looks like a freeze. A tool window is ours, not NSOpenPanel.
-+	auto *panel = new QFrame(host, Qt::Tool | Qt::FramelessWindowHint);
++	auto *panel = new QFrame(host);
 +	panel->setObjectName(u"importBrowser"_q);
 +	panel->setStyleSheet(
 +		"QFrame#importBrowser{background:#1c2733;border:1px solid #3e5670;border-radius:12px;}"
@@ -3899,10 +3978,11 @@ index 0000000..46aaaaf
 +	QObject::connect(cancel, &QPushButton::clicked, panel, [=] {
 +		panel->deleteLater();
 +	});
-+	const auto origin = host->mapToGlobal(QPoint(
++	panel->setGeometry(
 +		std::max(0, (host->width() - 460) / 2),
-+		std::max(0, (host->height() - 560) / 2)));
-+	panel->setGeometry(origin.x(), origin.y(), 460, 560);
++		std::max(0, (host->height() - 560) / 2),
++		460,
++		560);
 +	panel->show();
 +	panel->raise();
 +}
@@ -5410,7 +5490,7 @@ index 82a35ec..876719e 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..a18def1 100644
+index 8acc224..d62d9ae 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
 @@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -5499,10 +5579,16 @@ index 8acc224..a18def1 100644
  			_main->showAnimated(std::move(oldContentCache));
  		} else {
  			_main->activate();
-@@ -716,11 +749,26 @@ void MainWindow::fixOrder() {
+@@ -716,11 +749,32 @@ void MainWindow::fixOrder() {
  }
  
  void MainWindow::closeEvent(QCloseEvent *e) {
++	// Programmatic destroy must accept. Ignoring this close while the
++	// NSWindow is already going away is the Mac lockup.
++	if (Custom::WindowDestroying()) {
++		e->accept();
++		return;
++	}
 +	// File dialogs and account switches synthesize a close. Accepting it
 +	// before this check is what quit the process.
 +	if (Custom::FileDialogActive() || Custom::AccountSwitching()) {
@@ -5527,7 +5613,7 @@ index 8acc224..a18def1 100644
  		e->accept();
  		return;
  	}
-@@ -736,9 +784,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -736,9 +790,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
  		}
  		return false;
  	}();
@@ -5543,7 +5629,7 @@ index 8acc224..a18def1 100644
  }
  
  void MainWindow::updateControlsGeometry() {
-@@ -750,6 +802,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -750,6 +808,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -5560,7 +5646,7 @@ index 8acc224..a18def1 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
-@@ -791,4 +853,4 @@ MainWindow *wnd() {
+@@ -791,4 +859,4 @@ MainWindow *wnd() {
  		: nullptr;
  }
  
