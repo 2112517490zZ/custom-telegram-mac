@@ -357,10 +357,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..f7aaa52
+index 0000000..1f8c79c
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,525 @@
+@@ -0,0 +1,527 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -373,6 +373,7 @@ index 0000000..f7aaa52
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
++#include "mainwindow.h"
 +#include "ui/ui_utility.h"
 +#include "window/window_session_controller.h"
 +
@@ -639,13 +640,21 @@ index 0000000..f7aaa52
 +	});
 +	connect(button(QString::fromUtf8("关闭")), &QPushButton::clicked, this, closeSheet);
 +
-+	sheet->setGeometry(
++	sheet->show();
++	placeLoginSheet();
++}
++
++void AccountRail::placeLoginSheet() {
++	if (!_importChoices) {
++		return;
++	}
++	const auto host = _controller->widget().get();
++	_importChoices->setGeometry(
 +		std::max(0, (host->width() - 360) / 2),
 +		std::max(0, (host->height() - 520) / 2),
 +		360,
 +		520);
-+	sheet->show();
-+	sheet->raise();
++	_importChoices->raise();
 +}
 +
 +void AccountRail::scheduleRebuild() {
@@ -855,14 +864,7 @@ index 0000000..f7aaa52
 +	_import->raise();
 +	_export->raise();
 +	_search->raise();
-+	if (_importChoices) {
-+		_importChoices->setGeometry(
-+			6,
-+			std::max(0, _import->y() - 68),
-+			width() - 12,
-+			64);
-+		_importChoices->raise();
-+	}
++	placeLoginSheet();
 +}
 +
 +void AccountRail::paintEvent(QPaintEvent *e) {
@@ -888,10 +890,10 @@ index 0000000..f7aaa52
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..a6cefae
+index 0000000..49f2b94
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,70 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
@@ -938,6 +940,7 @@ index 0000000..a6cefae
 +	void saveOrder();
 +	void tickBounce();
 +	void showLoginSheet();
++	void placeLoginSheet();
 +
 +	const not_null<Window::SessionController*> _controller;
 +	bool _rebuilding = false;
