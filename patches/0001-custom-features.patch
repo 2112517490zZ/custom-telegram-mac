@@ -244,6 +244,45 @@ index 0d32197..156ff74 100644
  
  };
  
+diff --git a/Telegram/SourceFiles/core/application.cpp b/Telegram/SourceFiles/core/application.cpp
+index 30477ff..6aaf438 100644
+--- a/Telegram/SourceFiles/core/application.cpp
++++ b/Telegram/SourceFiles/core/application.cpp
+@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
+ */
+ #include "core/application.h"
+ 
++#include "custom/custom_control.h"
++
+ #include "data/data_abstract_structure.h"
+ #include "data/data_channel.h"
+ #include "data/data_forum.h"
+@@ -1678,9 +1680,14 @@ void Application::closeWindow(not_null<Window::Controller*> window) {
+ 	}
+ 	if (_lastActiveWindow == window) {
+ 		setLastActiveWindow(next);
+-		if (_lastActiveWindow) {
++		// Back from the QR window used to activate the logged-in window
++		// while this intro window was still being destroyed. macOS waits
++		// inside activateWindow and the process never returns.
++		if (_lastActiveWindow && !Custom::AccountSwitching()) {
+ 			_lastActiveWindow->activate();
+ 			_lastActiveWindow->widget()->updateGlobalMenu();
++		} else if (_lastActiveWindow) {
++			_lastActiveWindow->widget()->updateGlobalMenu();
+ 		}
+ 	}
+ 	_closingAsyncWindows.remove(window);
+@@ -1699,7 +1706,8 @@ void Application::closeWindow(not_null<Window::Controller*> window) {
+ 		: nullptr;
+ 	if (account
+ 		&& !_windows.contains(Window::SeparateId(account))
+-		&& _lastActiveWindow) {
++		&& _lastActiveWindow
++		&& !Custom::AccountSwitching()) {
+ 		domain().activate(&_lastActiveWindow->account());
+ 	}
+ 	if (_savedWindows) {
 diff --git a/Telegram/SourceFiles/core/enhanced_settings.cpp b/Telegram/SourceFiles/core/enhanced_settings.cpp
 index 82ea11a..cd52752 100644
 --- a/Telegram/SourceFiles/core/enhanced_settings.cpp
@@ -966,10 +1005,10 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..a2df5f5
+index 0000000..4583191
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1023 @@
+@@ -0,0 +1,1039 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1748,40 +1787,56 @@ index 0000000..a2df5f5
 +void ReturnToAuthedAccount(
 +		not_null<Window::Controller*> controller,
 +		not_null<Main::Account*> account) {
-+	if (!controller->isPrimary()) {
-+		crl::on_main(&Core::App(), [=] {
-+			if (Core::App().separateWindowFor(not_null(&controller->account()))) {
-+				Core::App().closeWindow(controller);
-+			}
-+			if (Core::App().domain().started()) {
-+				Core::App().domain().removeRedundantAccounts();
-+			}
-+		});
-+		return;
-+	}
 +	if (ReturnScheduled || !account->sessionExists()) {
 +		return;
 +	}
++	// The QR window is also marked primary, so the old isPrimary() check
++	// never took the close path. showAccount() on that window grabs it
++	// for a slide while it is being torn down, and macOS locks up.
 +	ReturnScheduled = true;
 +	BeginAccountSwitch();
++	const auto intro = controller;
 +	crl::on_main(&Core::App(), [=] {
-+		ReturnScheduled = false;
-+		if (!account->sessionExists() || !Core::App().domain().started()) {
-+			return;
++		Window::Controller *home = nullptr;
++		Core::App().enumerateWindows([&](not_null<Window::Controller*> window) {
++			if (window == intro || home) {
++				return;
++			}
++			if (window->maybeSession() && &window->account() == account.get()) {
++				home = window.get();
++			}
++		});
++		if (!home) {
++			Core::App().enumerateWindows([&](not_null<Window::Controller*> window) {
++				if (window == intro || home) {
++					return;
++				}
++				if (window->maybeSession()) {
++					home = window.get();
++				}
++			});
 +		}
-+		Core::App().setActivePrimaryWindow(controller);
-+		// One switch only. showAccount() plus activateWindow() on this
-+		// stack is the freeze: the slide grab deadlocks, then Mac waits
-+		// forever inside activateWindow while the intro is torn down.
-+		if (&account->domain().active() != account.get()) {
-+			account->domain().activate(account);
-+		} else {
-+			controller->showAccount(account);
++		if (home && intro.get() != home) {
++			auto *widget = home->widget().get();
++			widget->setWindowState(widget->windowState() & ~Qt::WindowMinimized);
++			widget->setVisible(true);
++			widget->raise();
++			Core::App().closeWindow(intro);
++			if (Core::App().domain().started()) {
++				Core::App().domain().removeRedundantAccounts();
++			}
 +		}
-+		const auto window = controller->widget();
-+		if (!window->isVisible()) {
-+			window->show();
-+		}
++		crl::on_main(&Core::App(), [=] {
++			ReturnScheduled = false;
++			if (!home || !account->sessionExists() || !Core::App().domain().started()) {
++				return;
++			}
++			if (&account->domain().active() != account.get()) {
++				account->domain().activate(account);
++			} else {
++				home->activate();
++			}
++		});
 +	});
 +}
 +
@@ -2723,10 +2778,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..718b94e
+index 0000000..a9c43a9
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,1090 @@
+@@ -0,0 +1,1164 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -2745,8 +2800,10 @@ index 0000000..718b94e
 +#include "storage/localstorage.h"
 +#include "storage/serialize_common.h"
 +#include "mtproto/mtproto_auth_key.h"
++#include "mainwindow.h"
 +#include "ui/toast/toast.h"
 +#include "ui/ui_utility.h"
++#include "window/window_controller.h"
 +
 +#include <crl/crl_async.h>
 +#include <crl/crl_on_main.h>
@@ -2768,7 +2825,12 @@ index 0000000..718b94e
 +#include <QtCore/QTimer>
 +#include <QtCore/QTemporaryDir>
 +#include <QtCore/QUrl>
-+#include <QtWidgets/QFileDialog>
++#include <QtWidgets/QFrame>
++#include <QtWidgets/QHBoxLayout>
++#include <QtWidgets/QLabel>
++#include <QtWidgets/QListWidget>
++#include <QtWidgets/QPushButton>
++#include <QtWidgets/QVBoxLayout>
 +#include <sqlite3.h>
 +
 +namespace Custom {
@@ -3705,57 +3767,124 @@ index 0000000..718b94e
 +	(void)domain;
 +}
 +
++void FillImportList(
++		QListWidget *list,
++		QLabel *pathLabel,
++		const QString &dir,
++		bool folder) {
++	pathLabel->setText(dir);
++	pathLabel->setProperty("dir", dir);
++	list->clear();
++	const auto entries = QDir(dir).entryInfoList(
++		QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
++		QDir::DirsFirst | QDir::Name);
++	for (const auto &info : entries) {
++		if (!info.isDir()
++			&& !info.fileName().endsWith(u".zip"_q, Qt::CaseInsensitive)) {
++			continue;
++		}
++		auto *item = new QListWidgetItem(
++			(info.isDir()
++				? QString::fromUtf8("[文件夹] ")
++				: QString::fromUtf8("[压缩包] ")) + info.fileName(),
++			list);
++		item->setData(Qt::UserRole, info.absoluteFilePath());
++		item->setData(Qt::UserRole + 1, info.isDir());
++	}
++	(void)folder;
++}
++
 +void OpenImportDialog(bool folder, not_null<Main::Domain*> domain) {
-+	// QFileDialog::getOpenFileName / getExistingDirectory run a nested
-+	// event loop around NSOpenPanel. On Mac that loop never returns, so
-+	// the process is frozen before the panel is usable. A non-native
-+	// dialog shown with show() does not take that lock.
-+	SetFileDialogActive(true);
-+	auto *dialog = new QFileDialog();
-+	dialog->setAttribute(Qt::WA_DeleteOnClose);
-+	dialog->setOption(QFileDialog::DontUseNativeDialog, true);
-+	dialog->setWindowFlag(Qt::WindowStaysOnTopHint, true);
-+	dialog->setWindowTitle(folder
-+		? QString::fromUtf8("导入帐号文件夹")
-+		: QString::fromUtf8("压缩包导入帐号"));
++	// QFileDialog on Mac enters NSOpenPanel and that nested loop never
++	// returns, even with DontUseNativeDialog. Browse with our own list.
++	const auto window = Core::App().activePrimaryWindow();
++	if (!window) {
++		Ui::Toast::Show(QString::fromUtf8("没有可用的主窗口"));
++		return;
++	}
++	auto *host = window->widget().get();
++	auto *panel = new QFrame(host);
++	panel->setObjectName(u"importBrowser"_q);
++	panel->setStyleSheet(
++		"QFrame#importBrowser{background:#1c2733;border:1px solid #3e5670;border-radius:12px;}"
++		"QLabel{color:#e8f0f7;background:transparent;}"
++		"QListWidget{background:#0e1621;color:#ffffff;border:1px solid #3e5670;}"
++		"QListWidget::item{padding:6px;}"
++		"QPushButton{background:#2b5278;color:#ffffff;border:0;border-radius:8px;padding:8px 12px;}");
++	auto *layout = new QVBoxLayout(panel);
++	layout->setContentsMargins(12, 12, 12, 12);
++	auto *title = new QLabel(folder
++		? QString::fromUtf8("选择 tdata 文件夹，双击进入")
++		: QString::fromUtf8("选择 zip，双击进入文件夹"), panel);
++	title->setWordWrap(true);
++	auto *pathLabel = new QLabel(panel);
++	pathLabel->setWordWrap(true);
++	auto *list = new QListWidget(panel);
++	layout->addWidget(title);
++	layout->addWidget(pathLabel);
++	layout->addWidget(list, 1);
++	auto *buttons = new QHBoxLayout();
++	auto *up = new QPushButton(QString::fromUtf8("上一级"), panel);
++	auto *use = new QPushButton(folder
++		? QString::fromUtf8("导入这个文件夹")
++		: QString::fromUtf8("导入选中的压缩包"), panel);
++	auto *cancel = new QPushButton(QString::fromUtf8("取消"), panel);
++	buttons->addWidget(up);
++	buttons->addWidget(use);
++	buttons->addWidget(cancel);
++	layout->addLayout(buttons);
++
 +	auto start = QStandardPaths::writableLocation(
 +		QStandardPaths::DownloadLocation);
 +	if (start.isEmpty()) {
 +		start = QDir::homePath();
 +	}
-+	dialog->setDirectory(start);
-+	if (folder) {
-+		dialog->setFileMode(QFileDialog::Directory);
-+		dialog->setOption(QFileDialog::ShowDirsOnly, true);
-+	} else {
-+		dialog->setFileMode(QFileDialog::ExistingFile);
-+		dialog->setNameFilter(u"Zip (*.zip);;All files (*)"_q);
-+	}
-+	dialog->setStyleSheet(
-+		"QWidget{background:#ffffff;color:#111111;}"
-+		"QLineEdit,QTreeView,QListView,QComboBox{background:#ffffff;color:#111111;}"
-+		"QPushButton{background:#e8e8e8;color:#111111;padding:4px 12px;}");
-+	QObject::connect(dialog, &QDialog::finished, &Core::App(), [=](int code) {
-+		auto path = QString();
-+		if (code == QDialog::Accepted) {
-+			const auto files = dialog->selectedFiles();
-+			if (!files.isEmpty()) {
-+				path = files.front();
-+			}
-+		}
-+		dialog->deleteLater();
++	FillImportList(list, pathLabel, start, folder);
++	const auto chosen = [=](const QString &path) {
++		panel->deleteLater();
 +		QTimer::singleShot(0, &Core::App(), [=] {
-+			ReleaseFileDialog();
-+			if (path.isEmpty()) {
-+				return;
-+			}
-+			QTimer::singleShot(0, &Core::App(), [=] {
-+				FinishImport(path, domain);
-+			});
++			FinishImport(path, domain);
 +		});
++	};
++	QObject::connect(up, &QPushButton::clicked, panel, [=] {
++		const auto dir = pathLabel->property("dir").toString();
++		const auto parent = QFileInfo(dir).dir().absolutePath();
++		if (!parent.isEmpty() && parent != dir) {
++			FillImportList(list, pathLabel, parent, folder);
++		}
 +	});
-+	dialog->show();
-+	dialog->raise();
++	QObject::connect(list, &QListWidget::itemActivated, panel, [=](QListWidgetItem *item) {
++		const auto path = item->data(Qt::UserRole).toString();
++		if (item->data(Qt::UserRole + 1).toBool()) {
++			FillImportList(list, pathLabel, path, folder);
++			return;
++		}
++		if (!folder) {
++			chosen(path);
++		}
++	});
++	QObject::connect(use, &QPushButton::clicked, panel, [=] {
++		if (folder) {
++			chosen(pathLabel->property("dir").toString());
++			return;
++		}
++		const auto item = list->currentItem();
++		if (!item || item->data(Qt::UserRole + 1).toBool()) {
++			Ui::Toast::Show(QString::fromUtf8("先选一个 zip"));
++			return;
++		}
++		chosen(item->data(Qt::UserRole).toString());
++	});
++	QObject::connect(cancel, &QPushButton::clicked, panel, [=] {
++		panel->deleteLater();
++	});
++	panel->setGeometry(
++		std::max(0, (host->width() - 460) / 2),
++		std::max(0, (host->height() - 560) / 2),
++		460,
++		560);
++	panel->show();
++	panel->raise();
 +}
 +
 +void ChooseAndImportAccountPack(
