@@ -1005,10 +1005,10 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..4583191
+index 0000000..daf8142
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1039 @@
+@@ -0,0 +1,1032 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1816,26 +1816,19 @@ index 0000000..4583191
 +				}
 +			});
 +		}
++		// Focus the already logged-in window first, while the QR window
++		// is still intact. activateWindow during its destruction is the lockup.
 +		if (home && intro.get() != home) {
-+			auto *widget = home->widget().get();
-+			widget->setWindowState(widget->windowState() & ~Qt::WindowMinimized);
-+			widget->setVisible(true);
-+			widget->raise();
-+			Core::App().closeWindow(intro);
-+			if (Core::App().domain().started()) {
-+				Core::App().domain().removeRedundantAccounts();
-+			}
++			home->activate();
 +		}
 +		crl::on_main(&Core::App(), [=] {
++			if (home && intro.get() != home) {
++				Core::App().closeWindow(intro);
++				if (Core::App().domain().started()) {
++					Core::App().domain().removeRedundantAccounts();
++				}
++			}
 +			ReturnScheduled = false;
-+			if (!home || !account->sessionExists() || !Core::App().domain().started()) {
-+				return;
-+			}
-+			if (&account->domain().active() != account.get()) {
-+				account->domain().activate(account);
-+			} else {
-+				home->activate();
-+			}
 +		});
 +	});
 +}
@@ -2778,10 +2771,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..a9c43a9
+index 0000000..ff61e06
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,1164 @@
+@@ -0,0 +1,1170 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -3207,12 +3200,12 @@ index 0000000..a9c43a9
 +		if (!ReadOneMtpFile(base, root, localKey, &one)) {
 +			continue;
 +		}
-+		if (one.authKey.size() != 256 || !one.userId) {
++		if (one.authKey.size() != 256) {
 +			continue;
 +		}
 +		auto duplicate = false;
 +		for (const auto &have : *out) {
-+			if (have.userId == one.userId) {
++			if (one.userId != 0 && have.userId == one.userId) {
 +				duplicate = true;
 +				break;
 +			}
@@ -3403,7 +3396,7 @@ index 0000000..a9c43a9
 +			auth.dcId = 2;
 +		}
 +		for (const auto &have : result) {
-+			if (have.userId == auth.userId) {
++			if (auth.userId != 0 && have.userId == auth.userId) {
 +				return;
 +			}
 +		}
@@ -3644,7 +3637,13 @@ index 0000000..a9c43a9
 +		SaveIndexEntry(auth);
 +		++imported;
 +		const auto account = domain.accounts().back().account.get();
-+		if (!account->sessionExists()) {
++		if (!account->sessionExists() && auth.userId != 0) {
++			account->createSession(
++				UserId(auth.userId),
++				QByteArray(),
++				0,
++				std::make_unique<Main::SessionSettings>());
++		} else if (!account->sessionExists()) {
 +			ResolveSelf(account);
 +		}
 +	} else if (error.isEmpty()) {
