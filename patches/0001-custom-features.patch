@@ -1005,10 +1005,10 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..daf8142
+index 0000000..3857f02
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1032 @@
+@@ -0,0 +1,1052 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1816,17 +1816,37 @@ index 0000000..daf8142
 +				}
 +			});
 +		}
-+		// Focus the already logged-in window first, while the QR window
-+		// is still intact. activateWindow during its destruction is the lockup.
-+		if (home && intro.get() != home) {
-+			home->activate();
++		if (!home || intro.get() == home) {
++			ReturnScheduled = false;
++			return;
 +		}
-+		crl::on_main(&Core::App(), [=] {
-+			if (home && intro.get() != home) {
-+				Core::App().closeWindow(intro);
-+				if (Core::App().domain().started()) {
-+					Core::App().domain().removeRedundantAccounts();
++		// Controller::activate() calls ActivateThisProcess(), which
++		// makeKeyAndOrderFront's the *current* window — this QR one.
++		// Closing it after that never returns, and the app drops to
++		// the background. Key the logged-in window by itself first,
++		// while this window is still intact, then close this one.
++		auto *widget = home->widget().get();
++		widget->setWindowState(widget->windowState() & ~Qt::WindowMinimized);
++		widget->show();
++		widget->raise();
++		Core::App().windowActivated(not_null<Window::Controller*>(home));
++		widget->activateWindow();
++		const auto homeId = home->id();
++		const auto introId = intro->id();
++		QTimer::singleShot(200, &Core::App(), [=] {
++			if (const auto still = Core::App().separateWindowFor(introId)) {
++				Core::App().closeWindow(still);
++			}
++			if (Core::App().domain().started()) {
++				Core::App().domain().removeRedundantAccounts();
++			}
++			if (const auto loggedIn = Core::App().separateWindowFor(homeId)) {
++				auto *back = loggedIn->widget().get();
++				if (!back->isVisible()) {
++					back->show();
 +				}
++				back->raise();
++				back->activateWindow();
 +			}
 +			ReturnScheduled = false;
 +		});
@@ -2771,10 +2791,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..ff61e06
+index 0000000..46aaaaf
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,1170 @@
+@@ -0,0 +1,1171 @@
 +#include "custom/custom_import.h"
 +
 +#include "core/application.h"
@@ -3802,7 +3822,9 @@ index 0000000..ff61e06
 +		return;
 +	}
 +	auto *host = window->widget().get();
-+	auto *panel = new QFrame(host);
++	// A child of the session view sits under the chat widgets, so the
++	// click looks like a freeze. A tool window is ours, not NSOpenPanel.
++	auto *panel = new QFrame(host, Qt::Tool | Qt::FramelessWindowHint);
 +	panel->setObjectName(u"importBrowser"_q);
 +	panel->setStyleSheet(
 +		"QFrame#importBrowser{background:#1c2733;border:1px solid #3e5670;border-radius:12px;}"
@@ -3877,11 +3899,10 @@ index 0000000..ff61e06
 +	QObject::connect(cancel, &QPushButton::clicked, panel, [=] {
 +		panel->deleteLater();
 +	});
-+	panel->setGeometry(
++	const auto origin = host->mapToGlobal(QPoint(
 +		std::max(0, (host->width() - 460) / 2),
-+		std::max(0, (host->height() - 560) / 2),
-+		460,
-+		560);
++		std::max(0, (host->height() - 560) / 2)));
++	panel->setGeometry(origin.x(), origin.y(), 460, 560);
 +	panel->show();
 +	panel->raise();
 +}
