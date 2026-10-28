@@ -6028,7 +6028,7 @@ new file mode 100644
 index 0000000..8531c41
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_login.cpp
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,575 @@
 +#include "custom/custom_login.h"
 +
 +#include "config.h"
@@ -6049,6 +6049,7 @@ index 0000000..8531c41
 +#include "platform/platform_webauthn.h"
 +#include "qr/qr_generate.h"
 +#include "storage/localstorage.h"
++#include "storage/storage_account.h"
 +#include "ui/toast/toast.h"
 +
 +#include <crl/crl.h>
