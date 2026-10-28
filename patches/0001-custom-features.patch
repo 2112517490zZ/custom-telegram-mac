@@ -6028,7 +6028,7 @@ new file mode 100644
 index 0000000..8531c41
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_login.cpp
-@@ -0,0 +1,575 @@
+@@ -0,0 +1,571 @@
 +#include "custom/custom_login.h"
 +
 +#include "config.h"
@@ -6040,6 +6040,8 @@ index 0000000..8531c41
 +#include "custom/custom_control.h"
 +#include "custom/custom_import.h"
 +#include "data/components/passkeys.h"
++#include "storage/localstorage.h"
++#include "storage/storage_account.h"
 +#include "main/main_account.h"
 +#include "main/main_domain.h"
 +#include "main/main_session.h"
@@ -6048,8 +6050,6 @@ index 0000000..8531c41
 +#include "mtproto/sender.h"
 +#include "platform/platform_webauthn.h"
 +#include "qr/qr_generate.h"
-+#include "storage/localstorage.h"
-+#include "storage/storage_account.h"
 +#include "ui/toast/toast.h"
 +
 +#include <crl/crl.h>
@@ -6194,11 +6194,11 @@ index 0000000..8531c41
 +}
 +
 +void LoginSheet::acceptAuth(const MTPauth_Authorization &auth) {
-+	if (!auth.match([&](const MTPDauth_authorization &data) {
++	auth.match([&](const MTPDauth_authorization &data) {
 +		const auto user = data.vuser();
 +		if (user.type() != mtpc_user || !user.c_user().is_self()) {
 +			fail(QString::fromUtf8("服务器没有返回可用的帐号"));
-+			return false;
++			return;
 +		}
 +		const auto id = UserId(user.c_user().vid());
 +		for (const auto &[index, existing] : Core::App().domain().accounts()) {
@@ -6213,7 +6213,7 @@ index 0000000..8531c41
 +					_account = nullptr;
 +					_sheet->deleteLater();
 +					keep->domain().activate(keep);
-+					return true;
++					return;
 +				}
 +			}
 +		}
@@ -6225,13 +6225,9 @@ index 0000000..8531c41
 +		ReleaseAccount(added);
 +		_sheet->deleteLater();
 +		added->domain().activate(added);
-+		return true;
 +	}, [&](const MTPDauth_authorizationSignUpRequired &) {
 +		fail(QString::fromUtf8("这个号码还没注册"));
-+		return false;
-+	})) {
-+		return;
-+	}
++	});
 +}
 +
 +void LoginSheet::askPassword() {
