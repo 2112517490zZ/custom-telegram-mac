@@ -1025,10 +1025,10 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..be24f39
+index 0000000..2fb626f
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1085 @@
+@@ -0,0 +1,1086 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1075,6 +1075,7 @@ index 0000000..be24f39
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QProcess>
 +#include <QtCore/QTimer>
++#include <QtGui/QWindow>
 +
 +namespace Custom {
 +namespace {
