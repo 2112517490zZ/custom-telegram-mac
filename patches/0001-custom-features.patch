@@ -6028,7 +6028,7 @@ new file mode 100644
 index 0000000..8531c41
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_login.cpp
-@@ -0,0 +1,571 @@
+@@ -0,0 +1,573 @@
 +#include "custom/custom_login.h"
 +
 +#include "config.h"
@@ -6383,6 +6383,8 @@ index 0000000..8531c41
 +			setStatus(QString::fromUtf8("验证码已发送，填上后点登录"));
 +		}, [&](const MTPDauth_sentCodeSuccess &data) {
 +			acceptAuth(data.vauthorization());
++		}, [&](const MTPDauth_sentCodePaymentRequired &) {
++			fail(QString::fromUtf8("这个号码要先付费才能收验证码"));
 +		});
 +	})).fail(crl::guard(this, [=](const MTP::Error &error) {
 +		_requestId = 0;
