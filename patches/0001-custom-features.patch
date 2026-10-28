@@ -1025,10 +1025,10 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..2fb626f
+index 0000000..a252154
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1086 @@
+@@ -0,0 +1,1018 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1075,7 +1075,6 @@ index 0000000..2fb626f
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QProcess>
 +#include <QtCore/QTimer>
-+#include <QtGui/QWindow>
 +
 +namespace Custom {
 +namespace {
@@ -1778,9 +1777,9 @@ index 0000000..2fb626f
 +				"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
 +			return;
 +		}
-+		// Official add-account opens a second window. Replacing the
-+		// logged-in window is what hid the app on the QR back button.
-+		domain.addActivated(MTP::Environment{}, true);
++		// Same window the first build used. A second window, then
++		// requestActivate while it is still key, is the Mac lockup.
++		domain.addActivated(MTP::Environment{});
 +	});
 +}
 +
@@ -1794,13 +1793,12 @@ index 0000000..2fb626f
 +
 +void BeginAccountSwitch() {
 +	++AccountSwitchDepth;
-+	// The close that Mac posts while the intro is torn down is queued
-+	// behind this call. A two-turn guard expired before that close ran,
-+	// and the window was then hidden to the background.
-+	QTimer::singleShot(3000, &Core::App(), [] {
-+		if (AccountSwitchDepth > 0) {
-+			--AccountSwitchDepth;
-+		}
++	crl::on_main(&Core::App(), [] {
++		crl::on_main(&Core::App(), [] {
++			if (AccountSwitchDepth > 0) {
++				--AccountSwitchDepth;
++			}
++		});
 +	});
 +}
 +
@@ -1812,84 +1810,18 @@ index 0000000..2fb626f
 +	if (ReturnScheduled || !account->sessionExists()) {
 +		return;
 +	}
-+	// The QR window is also marked primary, so the old isPrimary() check
-+	// never took the close path. showAccount() on that window grabs it
-+	// for a slide while it is being torn down, and macOS locks up.
++	// Switch the account inside this window. Closing it, or calling
++	// requestActivate while it is still the key window, does not return.
 +	ReturnScheduled = true;
 +	BeginAccountSwitch();
 +	const auto intro = controller;
 +	crl::on_main(&Core::App(), [=] {
-+		Window::Controller *home = nullptr;
-+		Core::App().enumerateWindows([&](not_null<Window::Controller*> window) {
-+			if (window == intro || home) {
-+				return;
-+			}
-+			if (window->maybeSession() && &window->account() == account.get()) {
-+				home = window.get();
-+			}
-+		});
-+		if (!home) {
-+			Core::App().enumerateWindows([&](not_null<Window::Controller*> window) {
-+				if (window == intro || home) {
-+					return;
-+				}
-+				if (window->maybeSession()) {
-+					home = window.get();
-+				}
-+			});
-+		}
-+		const auto finish = [=] {
-+			if (Core::App().domain().started()) {
-+				Core::App().domain().removeRedundantAccounts();
-+			}
-+			ReturnScheduled = false;
-+		};
-+		const auto introId = intro->id();
-+		if (!home || intro.get() == home) {
-+			// This window itself was swapped to the login page.
-+			// Put the logged-in account back. Closing the NSWindow
-+			// here is what drops the app to the background.
-+			crl::on_main(&Core::App(), [=] {
-+				if (const auto window = Core::App().separateWindowFor(introId)) {
-+					window->showAccount(account);
-+				}
-+				finish();
-+			});
++		ReturnScheduled = false;
++		if (!account->sessionExists()) {
 +			return;
 +		}
-+		// Do not call Controller::activate or activateWindow.
-+		// Both end in activateIgnoringOtherApps, and AppKit does not
-+		// return from that while this login window is still key.
-+		auto *widget = home->widget().get();
-+		widget->setWindowState(widget->windowState() & ~Qt::WindowMinimized);
-+		widget->setAttribute(Qt::WA_ShowWithoutActivating, false);
-+		widget->show();
-+		widget->raise();
-+		if (const auto handle = widget->windowHandle()) {
-+			handle->requestActivate();
-+		}
-+		const auto homeId = home->id();
-+		crl::on_main(&Core::App(), [=] {
-+			if (const auto still = Core::App().separateWindowFor(introId)) {
-+				still->widget()->hide();
-+			}
-+			crl::on_main(&Core::App(), [=] {
-+				if (const auto still = Core::App().separateWindowFor(introId)) {
-+					Core::App().closeWindow(still);
-+				}
-+				if (const auto loggedIn = Core::App().separateWindowFor(homeId)) {
-+					auto *back = loggedIn->widget().get();
-+					if (!back->isVisible()) {
-+						back->show();
-+					}
-+					back->raise();
-+					if (const auto handle = back->windowHandle()) {
-+						handle->requestActivate();
-+					}
-+				}
-+				finish();
-+			});
-+		});
++		Core::App().setActivePrimaryWindow(intro);
++		account->domain().activate(account);
 +	});
 +}
 +
@@ -2848,10 +2780,10 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..da3a2f1
+index 0000000..60da40e
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
-@@ -0,0 +1,1195 @@
+@@ -0,0 +1,1112 @@
 +#include "custom/custom_import.h"
 +
 +#include "api/api_updates.h"
@@ -2871,10 +2803,8 @@ index 0000000..da3a2f1
 +#include "storage/localstorage.h"
 +#include "storage/serialize_common.h"
 +#include "mtproto/mtproto_auth_key.h"
-+#include "mainwindow.h"
 +#include "ui/toast/toast.h"
 +#include "ui/ui_utility.h"
-+#include "window/window_controller.h"
 +
 +#include <crl/crl_async.h>
 +#include <crl/crl_on_main.h>
@@ -2896,12 +2826,7 @@ index 0000000..da3a2f1
 +#include <QtCore/QTimer>
 +#include <QtCore/QTemporaryDir>
 +#include <QtCore/QUrl>
-+#include <QtWidgets/QFrame>
-+#include <QtWidgets/QHBoxLayout>
-+#include <QtWidgets/QLabel>
-+#include <QtWidgets/QListWidget>
-+#include <QtWidgets/QPushButton>
-+#include <QtWidgets/QVBoxLayout>
++#include <QtWidgets/QFileDialog>
 +#include <sqlite3.h>
 +
 +namespace Custom {
@@ -3548,11 +3473,15 @@ index 0000000..da3a2f1
 +} // namespace
 +
 +// Mac posts a window-close when the file panel goes away. Clearing the
-+// flag in that same turn lets the close hide the app.
-+void ReleaseFileDialog() {
-+	crl::on_main(&Core::App(), [] {
-+		crl::on_main(&Core::App(), [] {
++// flag in that same turn lets the close hide the app. Activation has to
++// wait until that close has been ignored, or AppKit does not return.
++void ReleaseFileDialog(Fn<void()> done = nullptr) {
++	crl::on_main(&Core::App(), [=] {
++		crl::on_main(&Core::App(), [=] {
 +			SetFileDialogActive(false);
++			if (done) {
++				done();
++			}
 +		});
 +	});
 +}
@@ -3674,30 +3603,30 @@ index 0000000..da3a2f1
 +		if (imported > 0) {
 +			domain.notifyAccountsChanged();
 +			const auto added = domain.accounts().back().account.get();
-+			if (added->sessionExists()) {
-+				crl::on_main(&Core::App(), [=] {
-+					if (!Core::App().domain().started()) {
-+						return;
++			ReleaseFileDialog([added] {
++				if (!Core::App().domain().started()) {
++					return;
++				}
++				auto *alive = (Main::Account*)nullptr;
++				for (const auto &[index, existing] : Core::App().domain().accounts()) {
++					(void)index;
++					if (existing.get() == added) {
++						alive = existing.get();
++						break;
 +					}
-+					auto *alive = (Main::Account*)nullptr;
-+					for (const auto &[index, existing] : Core::App().domain().accounts()) {
-+						(void)index;
-+						if (existing.get() == added) {
-+							alive = existing.get();
-+							break;
-+						}
-+					}
-+					if (!alive || !alive->sessionExists()) {
-+						return;
-+					}
-+					alive->session().updates().getDifference();
-+					alive->domain().activate(alive);
-+				});
++				}
++				if (!alive || !alive->sessionExists()) {
++					return;
++				}
++				alive->session().updates().getDifference();
++				alive->domain().activate(alive);
++			});
++		} else {
++			if (error.isEmpty()) {
++				error = QString::fromUtf8("没有可导入帐号");
 +			}
-+		} else if (error.isEmpty()) {
-+			error = QString::fromUtf8("没有可导入帐号");
++			ReleaseFileDialog();
 +		}
-+		ReleaseFileDialog();
 +		ShowImportResult(imported, error);
 +		return;
 +	}
@@ -3867,139 +3796,59 @@ index 0000000..da3a2f1
 +	(void)domain;
 +}
 +
-+void FillImportList(
-+		QListWidget *list,
-+		QLabel *pathLabel,
-+		const QString &dir,
-+		bool folder) {
-+	pathLabel->setText(dir);
-+	pathLabel->setProperty("dir", dir);
-+	list->clear();
-+	const auto entries = QDir(dir).entryInfoList(
-+		QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot,
-+		QDir::DirsFirst | QDir::Name);
-+	for (const auto &info : entries) {
-+		if (!info.isDir()
-+			&& !info.fileName().endsWith(u".zip"_q, Qt::CaseInsensitive)) {
-+			continue;
-+		}
-+		auto *item = new QListWidgetItem(
-+			(info.isDir()
-+				? QString::fromUtf8("[文件夹] ")
-+				: QString::fromUtf8("[压缩包] ")) + info.fileName(),
-+			list);
-+		item->setData(Qt::UserRole, info.absoluteFilePath());
-+		item->setData(Qt::UserRole + 1, info.isDir());
++void OpenSystemChooser(bool folder, not_null<Main::Domain*> domain) {
++	// exec()/getOpenFileName runs NSOpenPanel with a nested loop and does
++	// not return once this window is asked to activate. open() uses the
++	// system panel's completion handler instead. No parent: a sheet on
++	// our window makes macOS close it.
++	SetFileDialogActive(true);
++	auto *dialog = new QFileDialog();
++	dialog->setAttribute(Qt::WA_DeleteOnClose);
++	dialog->setWindowModality(Qt::ApplicationModal);
++	dialog->setOption(QFileDialog::DontUseNativeDialog, false);
++	dialog->setWindowTitle(folder
++		? QString::fromUtf8("选择 tdata 文件夹")
++		: QString::fromUtf8("选择压缩包"));
++	if (folder) {
++		dialog->setFileMode(QFileDialog::Directory);
++		dialog->setOption(QFileDialog::ShowDirsOnly, true);
++	} else {
++		dialog->setFileMode(QFileDialog::ExistingFile);
++		dialog->setNameFilter(u"Zip (*.zip)"_q);
 +	}
-+	(void)folder;
-+}
-+
-+void OpenImportDialog(bool folder, not_null<Main::Domain*> domain) {
-+	// QFileDialog enters NSOpenPanel and that nested loop never returns.
-+	// A Qt::Tool window also becomes key and AppKit locks the process.
-+	// This list is a child of the main window, same as the login sheet.
-+	const auto window = Core::App().activePrimaryWindow();
-+	if (!window) {
-+		Ui::Toast::Show(QString::fromUtf8("没有可用的主窗口"));
-+		return;
-+	}
-+	auto *host = window->widget().get();
-+	auto *panel = new QFrame(host);
-+	panel->setObjectName(u"importBrowser"_q);
-+	panel->setStyleSheet(
-+		"QFrame#importBrowser{background:#1c2733;border:1px solid #3e5670;border-radius:12px;}"
-+		"QLabel{color:#e8f0f7;background:transparent;}"
-+		"QListWidget{background:#0e1621;color:#ffffff;border:1px solid #3e5670;}"
-+		"QListWidget::item{padding:6px;}"
-+		"QPushButton{background:#2b5278;color:#ffffff;border:0;border-radius:8px;padding:8px 12px;}");
-+	auto *layout = new QVBoxLayout(panel);
-+	layout->setContentsMargins(12, 12, 12, 12);
-+	auto *title = new QLabel(folder
-+		? QString::fromUtf8("选择 tdata 文件夹，双击进入")
-+		: QString::fromUtf8("选择 zip，双击进入文件夹"), panel);
-+	title->setWordWrap(true);
-+	auto *pathLabel = new QLabel(panel);
-+	pathLabel->setWordWrap(true);
-+	auto *list = new QListWidget(panel);
-+	layout->addWidget(title);
-+	layout->addWidget(pathLabel);
-+	layout->addWidget(list, 1);
-+	auto *buttons = new QHBoxLayout();
-+	auto *up = new QPushButton(QString::fromUtf8("上一级"), panel);
-+	auto *use = new QPushButton(folder
-+		? QString::fromUtf8("导入这个文件夹")
-+		: QString::fromUtf8("导入选中的压缩包"), panel);
-+	auto *cancel = new QPushButton(QString::fromUtf8("取消"), panel);
-+	buttons->addWidget(up);
-+	buttons->addWidget(use);
-+	buttons->addWidget(cancel);
-+	layout->addLayout(buttons);
-+
 +	auto start = QStandardPaths::writableLocation(
 +		QStandardPaths::DownloadLocation);
 +	if (start.isEmpty()) {
 +		start = QDir::homePath();
 +	}
-+	FillImportList(list, pathLabel, start, folder);
-+	const auto chosen = [=](const QString &path) {
-+		panel->deleteLater();
-+		QTimer::singleShot(0, &Core::App(), [=] {
++	dialog->setDirectory(start);
++	QObject::connect(dialog, &QDialog::finished, &Core::App(), [=](int result) {
++		const auto path = (result == QDialog::Accepted)
++			? dialog->selectedFiles().value(0)
++			: QString();
++		crl::on_main(&Core::App(), [=] {
++			if (path.isEmpty()) {
++				ReleaseFileDialog();
++				return;
++			}
 +			FinishImport(path, domain);
 +		});
-+	};
-+	QObject::connect(up, &QPushButton::clicked, panel, [=] {
-+		const auto dir = pathLabel->property("dir").toString();
-+		const auto parent = QFileInfo(dir).dir().absolutePath();
-+		if (!parent.isEmpty() && parent != dir) {
-+			FillImportList(list, pathLabel, parent, folder);
-+		}
 +	});
-+	QObject::connect(list, &QListWidget::itemActivated, panel, [=](QListWidgetItem *item) {
-+		const auto path = item->data(Qt::UserRole).toString();
-+		if (item->data(Qt::UserRole + 1).toBool()) {
-+			FillImportList(list, pathLabel, path, folder);
-+			return;
-+		}
-+		if (!folder) {
-+			chosen(path);
-+		}
-+	});
-+	QObject::connect(use, &QPushButton::clicked, panel, [=] {
-+		if (folder) {
-+			chosen(pathLabel->property("dir").toString());
-+			return;
-+		}
-+		const auto item = list->currentItem();
-+		if (!item || item->data(Qt::UserRole + 1).toBool()) {
-+			Ui::Toast::Show(QString::fromUtf8("先选一个 zip"));
-+			return;
-+		}
-+		chosen(item->data(Qt::UserRole).toString());
-+	});
-+	QObject::connect(cancel, &QPushButton::clicked, panel, [=] {
-+		panel->deleteLater();
-+	});
-+	panel->setGeometry(
-+		std::max(0, (host->width() - 460) / 2),
-+		std::max(0, (host->height() - 560) / 2),
-+		460,
-+		560);
-+	panel->show();
-+	panel->raise();
++	dialog->open();
 +}
 +
 +void ChooseAndImportAccountPack(
 +		QWidget *parent,
 +		not_null<Main::Domain*> domain) {
 +	(void)parent;
-+	OpenImportDialog(false, domain);
++	OpenSystemChooser(false, domain);
 +}
 +
 +void ChooseAndImportAccountFolder(
 +		QWidget *parent,
 +		not_null<Main::Domain*> domain) {
 +	(void)parent;
-+	OpenImportDialog(true, domain);
++	OpenSystemChooser(true, domain);
 +}
 +
 +void LoginBySecret(
@@ -4570,7 +4419,7 @@ index b3e4c28..6a31ba4 100644
  		const auto globalPosition = mapToGlobal(e->pos());
  		const auto thread = _suggestions
 diff --git a/Telegram/SourceFiles/intro/intro_widget.cpp b/Telegram/SourceFiles/intro/intro_widget.cpp
-index f188e0c..7bfa263 100644
+index f188e0c..f9f8d47 100644
 --- a/Telegram/SourceFiles/intro/intro_widget.cpp
 +++ b/Telegram/SourceFiles/intro/intro_widget.cpp
 @@ -36,6 +36,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4650,7 +4499,7 @@ index f188e0c..7bfa263 100644
  			backRequested();
  		}
  	} else if (e->key() == Qt::Key_Enter
-@@ -892,21 +917,26 @@ void Widget::keyPressEvent(QKeyEvent *e) {
+@@ -892,21 +917,22 @@ void Widget::keyPressEvent(QKeyEvent *e) {
  }
  
  void Widget::backRequested() {
@@ -4670,9 +4519,6 @@ index f188e0c..7bfa263 100644
 -			Animate::Back);
 +		return;
 +	}
-+	if (_leavingToAccount) {
-+		return;
-+	}
 +	const auto back = getData()->accountBeforeIntro.get();
 +	const auto controller = getData()->controller;
 +	auto target = (Main::Account*)nullptr;
@@ -4684,23 +4530,10 @@ index f188e0c..7bfa263 100644
 +	if (!target || !target->sessionExists() || !controller) {
 +		return;
  	}
-+	_leavingToAccount = true;
 +	Custom::ReturnToAuthedAccount(controller, target);
  }
  
  Widget::~Widget() {
-diff --git a/Telegram/SourceFiles/intro/intro_widget.h b/Telegram/SourceFiles/intro/intro_widget.h
-index 511f754..4ea59cc 100644
---- a/Telegram/SourceFiles/intro/intro_widget.h
-+++ b/Telegram/SourceFiles/intro/intro_widget.h
-@@ -215,6 +215,7 @@ private:
- 
- 	std::unique_ptr<Window::ConnectionState> _connecting;
- 
-+	bool _leavingToAccount = false;
- 	bool _nextShown = true;
- 	Ui::Animations::Simple _nextShownAnimation;
- 
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
 index efd667d..d8043cd 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
