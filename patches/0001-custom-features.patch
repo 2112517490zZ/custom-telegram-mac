@@ -887,14 +887,13 @@ new file mode 100644
 index 0000000..49f2b94
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,69 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
 +
 +#include <map>
 +
-+class QFrame;
 +class QLineEdit;
 +class QPushButton;
 +class QScrollArea;
@@ -944,7 +943,7 @@ index 0000000..49f2b94
 +	QWidget *_inner = nullptr;
 +	QPushButton *_add = nullptr;
 +	QPushButton *_import = nullptr;
-+	QFrame *_importChoices = nullptr;
++	QWidget *_importChoices = nullptr;
 +	QPushButton *_export = nullptr;
 +	QTimer *_bounce = nullptr;
 +	QString _query;
