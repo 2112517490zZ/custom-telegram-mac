@@ -962,7 +962,7 @@ new file mode 100644
 index 0000000..a252154
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1018 @@
+@@ -0,0 +1,1034 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1725,6 +1725,22 @@ index 0000000..a252154
 +	return FileDialogActiveFlag;
 +}
 +
++int LoginSheetDepth = 0;
++
++void BeginLoginSheet() {
++	++LoginSheetDepth;
++}
++
++void EndLoginSheet() {
++	if (LoginSheetDepth > 0) {
++		--LoginSheetDepth;
++	}
++}
++
++bool LoginSheetOpen() {
++	return LoginSheetDepth > 0;
++}
++
 +void BeginAccountSwitch() {
 +	++AccountSwitchDepth;
 +	crl::on_main(&Core::App(), [] {
@@ -1986,7 +2002,7 @@ new file mode 100644
 index 0000000..9bf87db
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,61 @@
+@@ -0,0 +1,64 @@
 +#pragma once
 +
 +namespace Main {
@@ -2015,6 +2031,9 @@ index 0000000..9bf87db
 +
 +void SetFileDialogActive(bool active);
 +[[nodiscard]] bool FileDialogActive();
++void BeginLoginSheet();
++void EndLoginSheet();
++[[nodiscard]] bool LoginSheetOpen();
 +void BeginAccountSwitch();
 +[[nodiscard]] bool AccountSwitching();
 +void BeginWindowDestroy();
@@ -3765,44 +3784,44 @@ index 0000000..b7e1b89
 +}
 +
 +void OpenSystemChooser(bool folder, not_null<Main::Domain*> domain) {
-+	// exec()/getOpenFileName runs NSOpenPanel with a nested loop and does
-+	// not return once this window is asked to activate. open() uses the
-+	// system panel's completion handler instead. No parent: a sheet on
-+	// our window makes macOS close it.
++	// An in-process NSOpenPanel posts a close to this window when the
++	// user confirms. Ignoring that close never returns from AppKit, and
++	// accepting it hides the app. The system panel runs in osascript.
 +	SetFileDialogActive(true);
-+	auto *dialog = new QFileDialog();
-+	dialog->setAttribute(Qt::WA_DeleteOnClose);
-+	dialog->setWindowModality(Qt::ApplicationModal);
-+	dialog->setOption(QFileDialog::DontUseNativeDialog, false);
-+	dialog->setWindowTitle(folder
-+		? QString::fromUtf8("选择 tdata 文件夹")
-+		: QString::fromUtf8("选择压缩包"));
-+	if (folder) {
-+		dialog->setFileMode(QFileDialog::Directory);
-+		dialog->setOption(QFileDialog::ShowDirsOnly, true);
-+	} else {
-+		dialog->setFileMode(QFileDialog::ExistingFile);
-+		dialog->setNameFilter(u"Zip (*.zip)"_q);
-+	}
-+	auto start = QStandardPaths::writableLocation(
-+		QStandardPaths::DownloadLocation);
-+	if (start.isEmpty()) {
-+		start = QDir::homePath();
-+	}
-+	dialog->setDirectory(start);
-+	QObject::connect(dialog, &QDialog::finished, &Core::App(), [=](int result) {
-+		const auto path = (result == QDialog::Accepted)
-+			? dialog->selectedFiles().value(0)
-+			: QString();
-+		crl::on_main(&Core::App(), [=] {
-+			if (path.isEmpty()) {
-+				ReleaseFileDialog();
-+				return;
-+			}
-+			FinishImport(path, domain);
++	auto *process = new QProcess(&Core::App());
++	const auto script = folder
++		? QString::fromUtf8(
++			"POSIX path of (choose folder with prompt \"选择 tdata 文件夹\")")
++		: QString::fromUtf8(
++			"POSIX path of (choose file with prompt \"选择压缩包\")");
++	QObject::connect(
++		process,
++		&QProcess::finished,
++		&Core::App(),
++		[=](int, QProcess::ExitStatus) {
++			const auto path = QString::fromUtf8(
++				process->readAllStandardOutput()).trimmed();
++			process->deleteLater();
++			QTimer::singleShot(0, &Core::App(), [=] {
++				if (path.isEmpty()) {
++					ReleaseFileDialog();
++					return;
++				}
++				FinishImport(path, domain);
++			});
 +		});
-+	});
-+	dialog->open();
++	QObject::connect(
++		process,
++		&QProcess::errorOccurred,
++		&Core::App(),
++		[=](QProcess::ProcessError error) {
++			if (error == QProcess::FailedToStart) {
++				process->deleteLater();
++				ReleaseFileDialog();
++				Ui::Toast::Show(QString::fromUtf8("系统选择窗口没有打开"));
++			}
++		});
++	process->start(u"/usr/bin/osascript"_q, { u"-e"_q, script });
 +}
 +
 +void ChooseAndImportAccountPack(
@@ -4542,7 +4561,19 @@ index efd667d..d8043cd 100644
  	} else {
  		Assert(!started());
  	}
-@@ -315,6 +326,66 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+@@ -304,6 +315,10 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+ 	account->setMtpMainDcId(mainDcId);
+ 	_local->startAdded(account, std::move(config));
+ 	watchSession(account);
+-	_accountsChanges.fire({});
++	// Listeners run inside fire(). Without a hold, an account that has no
++	// session yet is deleted before add() returns.
++	Custom::HoldAccount(account);
++	_accountsChanges.fire({});
++	Custom::ReleaseAccount(account);
+ 
+ 	auto &settings = Core::App().settings();
+@@ -315,6 +329,66 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
  	return account;
  }
  
@@ -5381,7 +5412,7 @@ index 8acc224..d62d9ae 100644
  			_main->showAnimated(std::move(oldContentCache));
  		} else {
  			_main->activate();
-@@ -716,11 +749,32 @@ void MainWindow::fixOrder() {
+@@ -716,11 +749,39 @@ void MainWindow::fixOrder() {
  }
  
  void MainWindow::closeEvent(QCloseEvent *e) {
@@ -5393,6 +5424,13 @@ index 8acc224..d62d9ae 100644
 +	}
 +	// File dialogs and account switches synthesize a close. Accepting it
 +	// before this check is what quit the process.
++	// Ignoring a close that AppKit already started (the in-process file
++	// panel) never returns. Login clicks must not reach hideNoQuit either:
++	// that is the "click and the app drops to the background" path.
++	if (Custom::LoginSheetOpen()) {
++		e->ignore();
++		return;
++	}
 +	if (Custom::FileDialogActive() || Custom::AccountSwitching()) {
 +		e->ignore();
 +		return;
@@ -6027,7 +6065,7 @@ new file mode 100644
 index 0000000..8531c41
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_login.cpp
-@@ -0,0 +1,573 @@
+@@ -0,0 +1,586 @@
 +#include "custom/custom_login.h"
 +
 +#include "config.h"
@@ -6115,6 +6153,7 @@ index 0000000..8531c41
 +LoginSheet::LoginSheet(QFrame *sheet)
 +: QObject(sheet)
 +, _sheet(sheet) {
++	BeginLoginSheet();
 +	_sheet->setObjectName(u"loginSheet"_q);
 +	_sheet->setStyleSheet(
 +		"QFrame#loginSheet{background:#1c2733;border:1px solid #3e5670;border-radius:14px;}"
@@ -6139,6 +6178,7 @@ index 0000000..8531c41
 +}
 +
 +LoginSheet::~LoginSheet() {
++	EndLoginSheet();
 +	*_alive = false;
 +	_qrTimer.stop();
 +	if (_api && _requestId) {
@@ -6175,7 +6215,8 @@ index 0000000..8531c41
 +		fail(QString::fromUtf8("客户端还没准备好"));
 +		return false;
 +	}
-+	domain.removeRedundantAccounts();
++	// Do not remove accounts here. That runs inside the mouse click and
++	// can destroy the window before this call returns.
 +	if (int(domain.accounts().size()) >= domain.maxAccounts()) {
 +		fail(QString::fromUtf8(
 +			"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
@@ -6505,15 +6546,20 @@ index 0000000..8531c41
 +	};
 +	connect(button(QString::fromUtf8("二维码")), &QPushButton::clicked, this, [=] {
 +		showPage(1);
-+		refreshQr();
++		setStatus(QString::fromUtf8("正在向服务器要二维码"));
++		// domain.add / MTP inside this click calls AppKit before mouseUp
++		// and the process never returns.
++		QTimer::singleShot(0, this, [=] { refreshQr(); });
 +	});
 +	connect(button(QString::fromUtf8("手机号")), &QPushButton::clicked, this, [=] {
 +		showPage(2);
-+		_phone->setFocus();
-+		setStatus(QString::fromUtf8("输入手机号，点获取验证码"));
++		QTimer::singleShot(0, this, [=] {
++			_phone->setFocus();
++			setStatus(QString::fromUtf8("输入手机号，点获取验证码"));
++		});
 +	});
 +	connect(button(QString::fromUtf8("通行密钥")), &QPushButton::clicked, this, [=] {
-+		startPasskey();
++		QTimer::singleShot(0, this, [=] { startPasskey(); });
 +	});
 +	connect(button(QString::fromUtf8("导入压缩包")), &QPushButton::clicked, this, [=] {
 +		_sheet->deleteLater();
@@ -6581,8 +6627,13 @@ index 0000000..8531c41
 +	layout->addWidget(_submit);
 +	layout->addWidget(back);
 +	layout->addStretch(1);
-+	connect(codeButton, &QPushButton::clicked, this, [=] { sendCode(); });
-+	connect(_submit, &QPushButton::clicked, this, [=] { signIn(); });
++	connect(codeButton, &QPushButton::clicked, this, [=] {
++		setStatus(QString::fromUtf8("正在发送验证码"));
++		QTimer::singleShot(0, this, [=] { sendCode(); });
++	});
++	connect(_submit, &QPushButton::clicked, this, [=] {
++		QTimer::singleShot(0, this, [=] { signIn(); });
++	});
 +	connect(back, &QPushButton::clicked, this, [=] {
 +		_needPassword = false;
 +		_password->hide();
