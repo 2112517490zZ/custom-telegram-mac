@@ -410,10 +410,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..996066b
+index 0000000..7753b2b
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,468 @@
+@@ -0,0 +1,514 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -651,6 +651,10 @@ index 0000000..996066b
 +	_rebuildQueued = true;
 +	crl::on_main(this, [=] {
 +		_rebuildQueued = false;
++		if (_rebuilding) {
++			scheduleRebuild();
++			return;
++		}
 +		rebuild();
 +	});
 +}
@@ -662,7 +666,7 @@ index 0000000..996066b
 +	const auto now = account->session().data().personalUnreadBadge();
 +	const auto previous = _lastUnread[account.get()];
 +	_lastUnread[account.get()] = now;
-+	if (const auto widget = _byAccount[account.get()]) {
++	if (const auto widget = _byAccount[account.get()].data()) {
 +		static_cast<RailButton*>(widget)->setUnread(now);
 +	}
 +	if (now > previous) {
@@ -677,7 +681,7 @@ index 0000000..996066b
 +	const auto now = QDateTime::currentMSecsSinceEpoch();
 +	auto alive = false;
 +	for (auto &[account, started] : _bounceAt) {
-+		const auto widget = _byAccount[account];
++		const auto widget = _byAccount[account].data();
 +		if (!widget) {
 +			continue;
 +		}
@@ -708,7 +712,7 @@ index 0000000..996066b
 +			continue;
 +		}
 +		for (const auto &[account, button] : _byAccount) {
-+			if (button == widget && account->sessionExists()) {
++			if (button.data() == widget && account->sessionExists()) {
 +				order.push_back(account->session().uniqueId());
 +			}
 +		}
@@ -724,7 +728,23 @@ index 0000000..996066b
 +	}
 +	_rebuilding = true;
 +	_badgeLifetime.destroy();
++	for (const auto &[account, widget] : _byAccount) {
++		(void)account;
++		if (widget) {
++			widget->removeEventFilter(this);
++		}
++	}
 +	_byAccount.clear();
++	_pressButton = nullptr;
++	_dragging = false;
++	// setWidget() deletes the old row and sends a palette event into
++	// eventFilter while that row is already freed. Drop it first.
++	_inner = nullptr;
++	if (auto *previous = _scroll->takeWidget()) {
++		previous->hide();
++		previous->setParent(nullptr);
++		previous->deleteLater();
++	}
 +	auto *inner = new QWidget;
 +	auto *layout = new QVBoxLayout(inner);
 +	layout->setContentsMargins(4, 4, 4, 4);
@@ -763,12 +783,17 @@ index 0000000..996066b
 +		});
 +		layout->addWidget(button);
 +		contentHeight += 66;
++		button->setMinimumSize(0, 0);
 +		account->session().data().unreadBadgeChanges(
 +		) | rpl::on_next([=] {
 +			noteUnread(account);
 +		}, _badgeLifetime);
 +	}
-+	inner->resize(width() > 0 ? width() : Width(), std::max(contentHeight, 8));
++	const auto innerWidth = std::max(width(), Width());
++	const auto innerHeight = std::max(contentHeight, 8);
++	inner->setMinimumSize(0, innerHeight);
++	inner->resize(innerWidth, innerHeight);
++	_scroll->setMinimumSize(0, 0);
 +	_scroll->setWidget(inner);
 +	_inner = inner;
 +	_add->raise();
@@ -778,13 +803,21 @@ index 0000000..996066b
 +}
 +
 +bool AccountRail::eventFilter(QObject *watched, QEvent *event) {
++	if (_rebuilding || !watched || !event || !_scroll || !_inner) {
++		return false;
++	}
++	const auto layout = _inner->layout();
++	if (!layout) {
++		return false;
++	}
 +	const auto button = qobject_cast<QWidget*>(watched);
-+	if (!button || !_inner || !_inner->layout()) {
++	if (!button || button->parentWidget() != _inner) {
 +		return false;
 +	}
 +	auto known = false;
 +	for (const auto &[account, widget] : _byAccount) {
-+		if (widget == button) {
++		(void)account;
++		if (widget.data() == button) {
 +			known = true;
 +			break;
 +		}
@@ -806,6 +839,9 @@ index 0000000..996066b
 +		}
 +		_dragging = true;
 +		auto *layout = qobject_cast<QVBoxLayout*>(_inner->layout());
++		if (!layout) {
++			return false;
++		}
 +		const auto from = layout->indexOf(button);
 +		const auto localY = _inner->mapFromGlobal(mouse->globalPos()).y();
 +		auto to = 0;
@@ -838,21 +874,31 @@ index 0000000..996066b
 +}
 +
 +void AccountRail::resizeEvent(QResizeEvent *e) {
-+	_search->setGeometry(6, 8, width() - 12, 28);
++	const auto railW = std::max(width(), 0);
++	const auto controlW = std::max(railW - 12, 0);
++	_search->setGeometry(6, 8, controlW, 28);
 +	const auto buttonH = 28;
 +	const auto gap = 4;
++	constexpr auto searchBottom = 42;
++	setMinimumHeight(searchBottom + buttonH * 3 + gap * 2 + 6);
 +	auto y = height() - 6 - buttonH;
++	if (y < searchBottom) {
++		y = searchBottom;
++	}
 +	const auto place = [&](QPushButton *button) {
-+		button->setGeometry(6, y, width() - 12, buttonH);
++		button->setMinimumSize(0, buttonH);
++		button->setGeometry(6, y, controlW, buttonH);
 +		y -= buttonH + gap;
 +	};
 +	place(_export);
 +	place(_import);
 +	place(_add);
-+	const auto listHeight = std::max(0, y - 42);
-+	_scroll->setGeometry(0, 42, width(), listHeight);
++	const auto listHeight = std::max(0, y - searchBottom);
++	_scroll->setMinimumSize(0, 0);
++	_scroll->setGeometry(0, searchBottom, railW, listHeight);
 +	if (_inner) {
-+		_inner->setFixedWidth(width());
++		_inner->setMinimumSize(std::max(railW, 1), std::max(_inner->minimumHeight(), 1));
++		_inner->setFixedWidth(std::max(railW, 1));
 +	}
 +	_add->raise();
 +	_import->raise();
@@ -884,13 +930,15 @@ index 0000000..996066b
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..49f2b94
+index 0000000..e713c48
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,71 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
++
++#include <QtCore/QPointer>
 +
 +#include <map>
 +
@@ -950,7 +998,7 @@ index 0000000..49f2b94
 +	QWidget *_pressButton = nullptr;
 +	int _pressY = 0;
 +	bool _dragging = false;
-+	std::map<Main::Account*, QWidget*> _byAccount;
++	std::map<Main::Account*, QPointer<QWidget>> _byAccount;
 +	std::map<Main::Account*, int> _lastUnread;
 +	std::map<Main::Account*, qint64> _bounceAt;
 +	rpl::lifetime _badgeLifetime;
@@ -959,7 +1007,7 @@ index 0000000..49f2b94
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..a252154
+index 0000000..b56d661
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
 @@ -0,0 +1,1034 @@
@@ -1999,7 +2047,7 @@ index 0000000..a252154
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..9bf87db
+index 0000000..050d7d1
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
 @@ -0,0 +1,64 @@
@@ -2740,7 +2788,7 @@ index 0000000..f7c19c5
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_import.cpp b/Telegram/SourceFiles/custom/custom_import.cpp
 new file mode 100644
-index 0000000..b7e1b89
+index 0000000..e1d6496
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_import.cpp
 @@ -0,0 +1,1139 @@
@@ -3944,6 +3992,614 @@ index 0000000..3462cd3
 +	not_null<Main::Domain*> domain);
 +
 +} // namespace Custom
+diff --git a/Telegram/SourceFiles/custom/custom_login.cpp b/Telegram/SourceFiles/custom/custom_login.cpp
+new file mode 100644
+index 0000000..4e5c885
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_login.cpp
+@@ -0,0 +1,586 @@
++#include "custom/custom_login.h"
++
++#include "config.h"
++#include "base/algorithm.h"
++#include "base/unixtime.h"
++#include "core/application.h"
++#include "data/data_peer_id.h"
++#include "core/core_cloud_password.h"
++#include "custom/custom_control.h"
++#include "custom/custom_import.h"
++#include "data/components/passkeys.h"
++#include "storage/localstorage.h"
++#include "storage/storage_account.h"
++#include "main/main_account.h"
++#include "main/main_domain.h"
++#include "main/main_session.h"
++#include "main/main_session_settings.h"
++#include "mtproto/mtproto_dc_options.h"
++#include "mtproto/sender.h"
++#include "platform/platform_webauthn.h"
++#include "qr/qr_generate.h"
++#include "ui/toast/toast.h"
++
++#include <crl/crl.h>
++
++#include <QtCore/QTimer>
++#include <QtGui/QPixmap>
++#include <QtWidgets/QFrame>
++#include <QtWidgets/QLabel>
++#include <QtWidgets/QLineEdit>
++#include <QtWidgets/QPushButton>
++#include <QtWidgets/QStackedWidget>
++#include <QtWidgets/QVBoxLayout>
++
++namespace Custom {
++namespace {
++
++class LoginSheet final : public QObject {
++public:
++	explicit LoginSheet(QFrame *sheet);
++	~LoginSheet();
++
++private:
++	void buildHome();
++	void buildQr();
++	void buildPhone();
++	void showPage(int index);
++	void setStatus(const QString &text);
++	bool ensureAccount();
++	void refreshQr();
++	void handleToken(const MTPauth_LoginToken &result);
++	void acceptAuth(const MTPauth_Authorization &auth);
++	void fail(const QString &text);
++	void askPassword();
++	void submitPassword();
++	void sendCode();
++	void signIn();
++	void startPasskey();
++	void showQrImage(const QByteArray &token);
++
++	QFrame *_sheet = nullptr;
++	QStackedWidget *_stack = nullptr;
++	QLabel *_status = nullptr;
++	QLabel *_qr = nullptr;
++	QLineEdit *_phone = nullptr;
++	QLineEdit *_code = nullptr;
++	QLineEdit *_password = nullptr;
++	QPushButton *_submit = nullptr;
++	QTimer _qrTimer;
++	Main::Account *_account = nullptr;
++	std::unique_ptr<MTP::Sender> _api;
++	std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
++	mtpRequestId _requestId = 0;
++	QByteArray _phoneHash;
++	Core::CloudPasswordState _passwordState;
++	bool _needPassword = false;
++	int _passkeyDc = 0;
++};
++
++QPushButton *MakeButton(const QString &text, QWidget *parent) {
++	auto *button = new QPushButton(text, parent);
++	return button;
++}
++
++LoginSheet::LoginSheet(QFrame *sheet)
++: QObject(sheet)
++, _sheet(sheet) {
++	BeginLoginSheet();
++	_sheet->setObjectName(u"loginSheet"_q);
++	_sheet->setStyleSheet(
++		"QFrame#loginSheet{background:#1c2733;border:1px solid #3e5670;border-radius:14px;}"
++		"QLabel{color:#e8f0f7;background:transparent;}"
++		"QPushButton{background:#2b5278;color:#ffffff;border:0;border-radius:8px;padding:9px 12px;font-size:13px;}"
++		"QPushButton:hover{background:#376890;}"
++		"QLineEdit{background:#0e1621;color:#ffffff;border:1px solid #3e5670;border-radius:8px;padding:6px;font-size:13px;}");
++	auto *outer = new QVBoxLayout(_sheet);
++	outer->setContentsMargins(16, 16, 16, 16);
++	_stack = new QStackedWidget(_sheet);
++	outer->addWidget(_stack, 1);
++	_status = new QLabel(_sheet);
++	_status->setWordWrap(true);
++	_status->setStyleSheet(u"color:#9bb0c3;font-size:12px;"_q);
++	outer->addWidget(_status);
++	_qrTimer.setSingleShot(true);
++	connect(&_qrTimer, &QTimer::timeout, this, [=] { refreshQr(); });
++	buildHome();
++	buildQr();
++	buildPhone();
++	showPage(0);
++}
++
++LoginSheet::~LoginSheet() {
++	EndLoginSheet();
++	*_alive = false;
++	_qrTimer.stop();
++	if (_api && _requestId) {
++		_api->request(base::take(_requestId)).cancel();
++	}
++	if (_account && !_account->sessionExists()) {
++		ReleaseAccount(_account);
++		crl::on_main(&Core::App(), [] {
++			if (Core::App().domain().started()) {
++				Core::App().domain().removeRedundantAccounts();
++			}
++		});
++	}
++	_account = nullptr;
++}
++
++void LoginSheet::showPage(int index) {
++	_stack->setCurrentIndex(index);
++	if (index != 1) {
++		_qrTimer.stop();
++	}
++}
++
++void LoginSheet::setStatus(const QString &text) {
++	_status->setText(text);
++}
++
++bool LoginSheet::ensureAccount() {
++	if (_account) {
++		return true;
++	}
++	auto &domain = Core::App().domain();
++	if (!domain.started()) {
++		fail(QString::fromUtf8("客户端还没准备好"));
++		return false;
++	}
++	// Do not remove accounts here. That runs inside the mouse click and
++	// can destroy the window before this call returns.
++	if (int(domain.accounts().size()) >= domain.maxAccounts()) {
++		fail(QString::fromUtf8(
++			"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
++		return false;
++	}
++	_account = domain.add(MTP::Environment{}).get();
++	HoldAccount(_account);
++	_api = std::make_unique<MTP::Sender>(&_account->mtp());
++	return true;
++}
++
++void LoginSheet::fail(const QString &text) {
++	setStatus(text);
++	Ui::Toast::Show(text);
++}
++
++void LoginSheet::acceptAuth(const MTPauth_Authorization &auth) {
++	auth.match([&](const MTPDauth_authorization &data) {
++		const auto user = data.vuser();
++		if (user.type() != mtpc_user || !user.c_user().is_self()) {
++			fail(QString::fromUtf8("服务器没有返回可用的帐号"));
++			return;
++		}
++		const auto id = UserId(user.c_user().vid());
++		for (const auto &[index, existing] : Core::App().domain().accounts()) {
++			(void)index;
++			if (existing.get() == _account) {
++				continue;
++			}
++			if (const auto session = existing->maybeSession()) {
++				if (session->userId() == id) {
++					ReleaseAccount(_account);
++					const auto keep = existing.get();
++					_account = nullptr;
++					_sheet->deleteLater();
++					keep->domain().activate(keep);
++					return;
++				}
++			}
++		}
++		_account->createSession(
++			user,
++			std::make_unique<Main::SessionSettings>());
++		_account->local().writeMtpData();
++		const auto added = _account;
++		ReleaseAccount(added);
++		_sheet->deleteLater();
++		added->domain().activate(added);
++	}, [&](const MTPDauth_authorizationSignUpRequired &) {
++		fail(QString::fromUtf8("这个号码还没注册"));
++	});
++}
++
++void LoginSheet::askPassword() {
++	if (!ensureAccount()) {
++		return;
++	}
++	_needPassword = true;
++	_password->show();
++	_password->setFocus();
++	setStatus(QString::fromUtf8("这个号开了两步验证，输入密码后再点登录"));
++	showPage(2);
++	_requestId = _api->request(MTPaccount_GetPassword(
++	)).done(crl::guard(this, [=](const MTPaccount_Password &result) {
++		_requestId = 0;
++		result.match([&](const MTPDaccount_password &data) {
++			_passwordState = Core::ParseCloudPasswordState(data);
++			if (!_passwordState.hasPassword) {
++				fail(QString::fromUtf8("服务器没有给出密码校验"));
++			}
++		});
++	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		_requestId = 0;
++		fail(error.type());
++	})).send();
++}
++
++void LoginSheet::submitPassword() {
++	if (!_passwordState.mtp.request) {
++		fail(QString::fromUtf8("密码校验还没准备好"));
++		return;
++	}
++	const auto password = _password->text().toUtf8();
++	const auto hash = Core::ComputeCloudPasswordHash(
++		_passwordState.mtp.request.algo,
++		bytes::make_span(password));
++	const auto check = Core::ComputeCloudPasswordCheck(
++		_passwordState.mtp.request,
++		hash);
++	if (!check) {
++		fail(QString::fromUtf8("这个客户端算不出这套密码"));
++		return;
++	}
++	_passwordState.mtp.request.id = 0;
++	_requestId = _api->request(
++		MTPauth_CheckPassword(check.result)
++	).done(crl::guard(this, [=](const MTPauth_Authorization &result) {
++		_requestId = 0;
++		acceptAuth(result);
++	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		_requestId = 0;
++		fail(error.type() == u"PASSWORD_HASH_INVALID"_q
++			? QString::fromUtf8("密码不对")
++			: error.type());
++	})).send();
++}
++
++void LoginSheet::showQrImage(const QByteArray &token) {
++	auto link = QByteArray("tg://login?token=");
++	link += token.toBase64(QByteArray::Base64UrlEncoding);
++	const auto data = Qr::Encode(link, Qr::Redundancy::Quartile);
++	if (data.size <= 0) {
++		fail(QString::fromUtf8("二维码没有生成出来"));
++		return;
++	}
++	const auto image = Qr::Generate(data, 8, Qt::black);
++	_qr->setPixmap(QPixmap::fromImage(image).scaled(
++		220,
++		220,
++		Qt::KeepAspectRatio,
++		Qt::SmoothTransformation));
++	setStatus(QString::fromUtf8("用已经登录的 Telegram 扫这个码"));
++}
++
++void LoginSheet::handleToken(const MTPauth_LoginToken &result) {
++	result.match([&](const MTPDauth_loginToken &data) {
++		_requestId = 0;
++		showQrImage(data.vtoken().v);
++		const auto left = data.vexpires().v - base::unixtime::now();
++		_qrTimer.start(std::max(left, 1) * crl::time(1000));
++	}, [&](const MTPDauth_loginTokenMigrateTo &data) {
++		_api->instance().setMainDcId(data.vdc_id().v);
++		_requestId = _api->request(MTPauth_ImportLoginToken(
++			MTP_bytes(data.vtoken().v)
++		)).done(crl::guard(this, [=](const MTPauth_LoginToken &next) {
++			handleToken(next);
++		})).fail(crl::guard(this, [=](const MTP::Error &error) {
++			_requestId = 0;
++			if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
++				askPassword();
++			} else {
++				fail(error.type());
++			}
++		})).toDC(data.vdc_id().v).send();
++	}, [&](const MTPDauth_loginTokenSuccess &data) {
++		_requestId = 0;
++		_qrTimer.stop();
++		acceptAuth(data.vauthorization());
++	});
++}
++
++void LoginSheet::refreshQr() {
++	if (!ensureAccount() || _requestId) {
++		return;
++	}
++	setStatus(QString::fromUtf8("正在向服务器要二维码"));
++	_requestId = _api->request(MTPauth_ExportLoginToken(
++		MTP_int(ApiId),
++		MTP_string(ApiHash),
++		MTP_vector<MTPlong>(0)
++	)).done(crl::guard(this, [=](const MTPauth_LoginToken &result) {
++		handleToken(result);
++	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		_requestId = 0;
++		if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
++			askPassword();
++		} else {
++			fail(error.type());
++		}
++	})).send();
++}
++
++void LoginSheet::sendCode() {
++	if (!ensureAccount()) {
++		return;
++	}
++	auto phone = _phone->text();
++	phone.remove(QChar(' '));
++	phone.remove(QChar('-'));
++	if (phone.startsWith(u"+"_q)) {
++		phone.remove(0, 1);
++	}
++	if (phone.size() < 6) {
++		fail(QString::fromUtf8("先输入手机号，带国家码"));
++		return;
++	}
++	_api->instance().setUserPhone(phone);
++	setStatus(QString::fromUtf8("正在发送验证码"));
++	_requestId = _api->request(MTPauth_SendCode(
++		MTP_string(phone),
++		MTP_int(ApiId),
++		MTP_string(ApiHash),
++		MTP_codeSettings(
++			MTP_flags(0),
++			MTPVector<MTPbytes>(),
++			MTPstring(),
++			MTPBool())
++	)).done(crl::guard(this, [=](const MTPauth_SentCode &result) {
++		_requestId = 0;
++		result.match([&](const MTPDauth_sentCode &data) {
++			_phoneHash = data.vphone_code_hash().v;
++			_code->show();
++			_code->setFocus();
++			setStatus(QString::fromUtf8("验证码已发送，填上后点登录"));
++		}, [&](const MTPDauth_sentCodeSuccess &data) {
++			acceptAuth(data.vauthorization());
++		}, [&](const MTPDauth_sentCodePaymentRequired &) {
++			fail(QString::fromUtf8("这个号码要先付费才能收验证码"));
++		});
++	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		_requestId = 0;
++		const auto type = error.type();
++		if (type.startsWith(u"PHONE_MIGRATE_"_q)) {
++			const auto dc = type.mid(14).toInt();
++			if (dc > 0) {
++				_api->instance().setMainDcId(dc);
++				sendCode();
++				return;
++			}
++		}
++		fail(type);
++	})).send();
++}
++
++void LoginSheet::signIn() {
++	if (_needPassword) {
++		submitPassword();
++		return;
++	}
++	if (!ensureAccount()) {
++		return;
++	}
++	if (_phoneHash.isEmpty()) {
++		fail(QString::fromUtf8("先获取验证码"));
++		return;
++	}
++	auto phone = _phone->text();
++	phone.remove(QChar(' '));
++	phone.remove(QChar('-'));
++	if (phone.startsWith(u"+"_q)) {
++		phone.remove(0, 1);
++	}
++	const auto code = _code->text().trimmed();
++	if (code.isEmpty()) {
++		fail(QString::fromUtf8("先填写验证码"));
++		return;
++	}
++	_requestId = _api->request(MTPauth_SignIn(
++		MTP_flags(MTPauth_SignIn::Flag::f_phone_code),
++		MTP_string(phone),
++		MTP_bytes(_phoneHash),
++		MTP_string(code),
++		MTP_emailVerificationCode(MTP_string())
++	)).done(crl::guard(this, [=](const MTPauth_Authorization &result) {
++		_requestId = 0;
++		acceptAuth(result);
++	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		_requestId = 0;
++		if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
++			askPassword();
++		} else {
++			fail(error.type());
++		}
++	})).send();
++}
++
++void LoginSheet::startPasskey() {
++	if (!ensureAccount()) {
++		return;
++	}
++	if (!Platform::WebAuthn::IsSupported()) {
++		fail(QString::fromUtf8("这台系统没有通行密钥"));
++		return;
++	}
++	setStatus(QString::fromUtf8("正在调用系统通行密钥"));
++	const auto initialDc = _api->instance().mainDcId();
++	::Data::InitPasskeyLogin(*_api, crl::guard(this, [=](
++			const ::Data::Passkey::LoginData &loginData) {
++		_passkeyDc = initialDc;
++		Platform::WebAuthn::Login(loginData, crl::guard(this, [=](
++				Platform::WebAuthn::LoginResult result) {
++			if (result.userHandle.isEmpty()) {
++				if (result.error == Platform::WebAuthn::Error::UnsignedBuild) {
++					fail(QString::fromUtf8(
++						"通行密钥要求应用有系统签名，这个包还没签"));
++				} else if (result.error == Platform::WebAuthn::Error::Cancelled) {
++					setStatus(QString::fromUtf8("已取消通行密钥"));
++				} else {
++					fail(QString::fromUtf8("通行密钥没有完成"));
++				}
++				return;
++			}
++			::Data::FinishPasskeyLogin(
++				*_api,
++				_passkeyDc,
++				result,
++				crl::guard(this, [=](const MTPauth_Authorization &auth) {
++					acceptAuth(auth);
++				}),
++				crl::guard(this, [=](QString error) {
++					if (error == u"SESSION_PASSWORD_NEEDED"_q) {
++						askPassword();
++					} else {
++						fail(error);
++					}
++				}));
++		}));
++	}));
++}
++
++void LoginSheet::buildHome() {
++	auto *page = new QWidget(_stack);
++	auto *layout = new QVBoxLayout(page);
++	layout->setContentsMargins(0, 0, 0, 0);
++	layout->setSpacing(8);
++	auto *title = new QLabel(QString::fromUtf8("添加帐号"), page);
++	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
++	auto *hint = new QLabel(QString::fromUtf8(
++		"二维码、手机号、通行密钥都在这个窗口里完成。"), page);
++	hint->setWordWrap(true);
++	layout->addWidget(title);
++	layout->addWidget(hint);
++	const auto button = [&](const QString &text) {
++		auto *widget = MakeButton(text, page);
++		layout->addWidget(widget);
++		return widget;
++	};
++	connect(button(QString::fromUtf8("二维码")), &QPushButton::clicked, this, [=] {
++		showPage(1);
++		setStatus(QString::fromUtf8("正在向服务器要二维码"));
++		// domain.add / MTP inside this click calls AppKit before mouseUp
++		// and the process never returns.
++		QTimer::singleShot(0, this, [=] { refreshQr(); });
++	});
++	connect(button(QString::fromUtf8("手机号")), &QPushButton::clicked, this, [=] {
++		showPage(2);
++		QTimer::singleShot(0, this, [=] {
++			_phone->setFocus();
++			setStatus(QString::fromUtf8("输入手机号，点获取验证码"));
++		});
++	});
++	connect(button(QString::fromUtf8("通行密钥")), &QPushButton::clicked, this, [=] {
++		QTimer::singleShot(0, this, [=] { startPasskey(); });
++	});
++	connect(button(QString::fromUtf8("导入压缩包")), &QPushButton::clicked, this, [=] {
++		_sheet->deleteLater();
++		QTimer::singleShot(0, &Core::App(), [] {
++			ChooseAndImportAccountPack(nullptr, &Core::App().domain());
++		});
++	});
++	connect(button(QString::fromUtf8("关闭")), &QPushButton::clicked, this, [=] {
++		_sheet->deleteLater();
++	});
++	layout->addStretch(1);
++	_stack->addWidget(page);
++}
++
++void LoginSheet::buildQr() {
++	auto *page = new QWidget(_stack);
++	auto *layout = new QVBoxLayout(page);
++	layout->setContentsMargins(0, 0, 0, 0);
++	layout->setSpacing(8);
++	auto *title = new QLabel(QString::fromUtf8("扫码登录"), page);
++	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
++	_qr = new QLabel(page);
++	_qr->setFixedSize(220, 220);
++	_qr->setAlignment(Qt::AlignCenter);
++	_qr->setStyleSheet(u"background:#ffffff;border-radius:8px;"_q);
++	layout->addWidget(title);
++	layout->addWidget(_qr, 0, Qt::AlignHCenter);
++	auto *back = MakeButton(QString::fromUtf8("返回"), page);
++	layout->addWidget(back);
++	layout->addStretch(1);
++	connect(back, &QPushButton::clicked, this, [=] {
++		_qrTimer.stop();
++		if (_api && _requestId) {
++			_api->request(base::take(_requestId)).cancel();
++		}
++		showPage(0);
++		setStatus(QString());
++	});
++	_stack->addWidget(page);
++}
++
++void LoginSheet::buildPhone() {
++	auto *page = new QWidget(_stack);
++	auto *layout = new QVBoxLayout(page);
++	layout->setContentsMargins(0, 0, 0, 0);
++	layout->setSpacing(8);
++	auto *title = new QLabel(QString::fromUtf8("手机号登录"), page);
++	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
++	_phone = new QLineEdit(page);
++	_phone->setPlaceholderText(QString::fromUtf8("手机号，带国家码，例如 8613800138000"));
++	_code = new QLineEdit(page);
++	_code->setPlaceholderText(QString::fromUtf8("验证码"));
++	_password = new QLineEdit(page);
++	_password->setEchoMode(QLineEdit::Password);
++	_password->setPlaceholderText(QString::fromUtf8("两步验证密码"));
++	_password->hide();
++	layout->addWidget(title);
++	layout->addWidget(_phone);
++	layout->addWidget(_code);
++	layout->addWidget(_password);
++	const auto codeButton = MakeButton(QString::fromUtf8("获取验证码"), page);
++	_submit = MakeButton(QString::fromUtf8("登录"), page);
++	const auto back = MakeButton(QString::fromUtf8("返回"), page);
++	layout->addWidget(codeButton);
++	layout->addWidget(_submit);
++	layout->addWidget(back);
++	layout->addStretch(1);
++	connect(codeButton, &QPushButton::clicked, this, [=] {
++		setStatus(QString::fromUtf8("正在发送验证码"));
++		QTimer::singleShot(0, this, [=] { sendCode(); });
++	});
++	connect(_submit, &QPushButton::clicked, this, [=] {
++		QTimer::singleShot(0, this, [=] { signIn(); });
++	});
++	connect(back, &QPushButton::clicked, this, [=] {
++		_needPassword = false;
++		_password->hide();
++		showPage(0);
++		setStatus(QString());
++	});
++	_stack->addWidget(page);
++}
++
++} // namespace
++
++QWidget *CreateLoginSheet(QWidget *host) {
++	auto *sheet = new QFrame(host);
++	new LoginSheet(sheet);
++	return sheet;
++}
++
++} // namespace Custom
+diff --git a/Telegram/SourceFiles/custom/custom_login.h b/Telegram/SourceFiles/custom/custom_login.h
+new file mode 100644
+index 0000000..0c1d62d
+--- /dev/null
++++ b/Telegram/SourceFiles/custom/custom_login.h
+@@ -0,0 +1,10 @@
++#pragma once
++
++class QWidget;
++
++namespace Custom {
++
++// Small sheet on the current window. QR, phone, and passkey stay here.
++[[nodiscard]] QWidget *CreateLoginSheet(QWidget *host);
++
++} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_personal.h b/Telegram/SourceFiles/custom/custom_personal.h
 new file mode 100644
 index 0000000..41f03a2
@@ -4522,7 +5178,7 @@ index f188e0c..f9f8d47 100644
  
  Widget::~Widget() {
 diff --git a/Telegram/SourceFiles/main/main_domain.cpp b/Telegram/SourceFiles/main/main_domain.cpp
-index efd667d..d8043cd 100644
+index efd667d..d92173d 100644
 --- a/Telegram/SourceFiles/main/main_domain.cpp
 +++ b/Telegram/SourceFiles/main/main_domain.cpp
 @@ -13,6 +13,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -4561,19 +5217,19 @@ index efd667d..d8043cd 100644
  	} else {
  		Assert(!started());
  	}
-@@ -304,6 +315,10 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+@@ -304,7 +315,11 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
  	account->setMtpMainDcId(mainDcId);
  	_local->startAdded(account, std::move(config));
  	watchSession(account);
--	_accountsChanges.fire({});
 +	// Listeners run inside fire(). Without a hold, an account that has no
 +	// session yet is deleted before add() returns.
 +	Custom::HoldAccount(account);
-+	_accountsChanges.fire({});
+ 	_accountsChanges.fire({});
 +	Custom::ReleaseAccount(account);
  
  	auto &settings = Core::App().settings();
-@@ -315,6 +329,66 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
+ 	if (_accounts.size() == 2 && !settings.mainMenuAccountsShown()) {
+@@ -315,6 +330,66 @@ not_null<Main::Account*> Domain::add(MTP::Environment environment) {
  	return account;
  }
  
@@ -4640,7 +5296,7 @@ index efd667d..d8043cd 100644
  void Domain::addActivated(MTP::Environment environment, bool newWindow) {
  	const auto added = [&](not_null<Main::Account*> account) {
  		if (newWindow) {
-@@ -343,7 +414,17 @@ void Domain::watchSession(not_null<Account*> account) {
+@@ -343,7 +418,17 @@ void Domain::watchSession(not_null<Account*> account) {
  	account->sessionValue(
  	) | rpl::filter([=](Session *session) {
  		return session != nullptr;
@@ -4659,7 +5315,7 @@ index efd667d..d8043cd 100644
  		session->data().unreadBadgeChanges(
  		) | rpl::on_next([=] {
  			scheduleUpdateUnreadBadge();
-@@ -429,7 +510,8 @@ void Domain::removeRedundantAccounts() {
+@@ -429,7 +514,8 @@ void Domain::removeRedundantAccounts() {
  	const auto was = _accounts.size();
  	for (auto i = _accounts.begin(); i != _accounts.end();) {
  		if (Core::App().separateWindowFor(not_null(i->account.get()))
@@ -4669,7 +5325,7 @@ index efd667d..d8043cd 100644
  			++i;
  			continue;
  		}
-@@ -516,14 +598,15 @@ void Domain::scheduleWriteAccounts() {
+@@ -516,14 +602,15 @@ void Domain::scheduleWriteAccounts() {
  }
  
  int Domain::maxAccounts() const {
@@ -5323,7 +5979,7 @@ index 82a35ec..876719e 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwindow.cpp b/Telegram/SourceFiles/mainwindow.cpp
-index 8acc224..d62d9ae 100644
+index 8acc224..dc13178 100644
 --- a/Telegram/SourceFiles/mainwindow.cpp
 +++ b/Telegram/SourceFiles/mainwindow.cpp
 @@ -23,6 +23,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -5453,7 +6109,7 @@ index 8acc224..d62d9ae 100644
  		e->accept();
  		return;
  	}
-@@ -736,9 +790,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
+@@ -736,9 +797,13 @@ void MainWindow::closeEvent(QCloseEvent *e) {
  		}
  		return false;
  	}();
@@ -5469,7 +6125,7 @@ index 8acc224..d62d9ae 100644
  }
  
  void MainWindow::updateControlsGeometry() {
-@@ -750,6 +808,16 @@ void MainWindow::updateControlsGeometry() {
+@@ -750,6 +815,16 @@ void MainWindow::updateControlsGeometry() {
  	auto mainLeft = 0;
  	auto mainWidth = body.width();
  	if (const auto session = sessionController()) {
@@ -5486,7 +6142,7 @@ index 8acc224..d62d9ae 100644
  		if (const auto skip = session->filtersWidth()) {
  			mainLeft += skip;
  			mainWidth -= skip;
-@@ -791,4 +859,4 @@ MainWindow *wnd() {
+@@ -791,4 +866,4 @@ MainWindow *wnd() {
  		: nullptr;
  }
  
@@ -6060,611 +6716,3 @@ index e3d187f..53341a5 100644
  	[[nodiscard]] bool enoughSpaceForFilters() const;
  	[[nodiscard]] rpl::producer<bool> enoughSpaceForFiltersValue() const;
  	[[nodiscard]] rpl::producer<FilterId> activeChatsFilter() const;
-diff --git a/Telegram/SourceFiles/custom/custom_login.cpp b/Telegram/SourceFiles/custom/custom_login.cpp
-new file mode 100644
-index 0000000..8531c41
---- /dev/null
-+++ b/Telegram/SourceFiles/custom/custom_login.cpp
-@@ -0,0 +1,586 @@
-+#include "custom/custom_login.h"
-+
-+#include "config.h"
-+#include "base/algorithm.h"
-+#include "base/unixtime.h"
-+#include "core/application.h"
-+#include "data/data_peer_id.h"
-+#include "core/core_cloud_password.h"
-+#include "custom/custom_control.h"
-+#include "custom/custom_import.h"
-+#include "data/components/passkeys.h"
-+#include "storage/localstorage.h"
-+#include "storage/storage_account.h"
-+#include "main/main_account.h"
-+#include "main/main_domain.h"
-+#include "main/main_session.h"
-+#include "main/main_session_settings.h"
-+#include "mtproto/mtproto_dc_options.h"
-+#include "mtproto/sender.h"
-+#include "platform/platform_webauthn.h"
-+#include "qr/qr_generate.h"
-+#include "ui/toast/toast.h"
-+
-+#include <crl/crl.h>
-+
-+#include <QtCore/QTimer>
-+#include <QtGui/QPixmap>
-+#include <QtWidgets/QFrame>
-+#include <QtWidgets/QLabel>
-+#include <QtWidgets/QLineEdit>
-+#include <QtWidgets/QPushButton>
-+#include <QtWidgets/QStackedWidget>
-+#include <QtWidgets/QVBoxLayout>
-+
-+namespace Custom {
-+namespace {
-+
-+class LoginSheet final : public QObject {
-+public:
-+	explicit LoginSheet(QFrame *sheet);
-+	~LoginSheet();
-+
-+private:
-+	void buildHome();
-+	void buildQr();
-+	void buildPhone();
-+	void showPage(int index);
-+	void setStatus(const QString &text);
-+	bool ensureAccount();
-+	void refreshQr();
-+	void handleToken(const MTPauth_LoginToken &result);
-+	void acceptAuth(const MTPauth_Authorization &auth);
-+	void fail(const QString &text);
-+	void askPassword();
-+	void submitPassword();
-+	void sendCode();
-+	void signIn();
-+	void startPasskey();
-+	void showQrImage(const QByteArray &token);
-+
-+	QFrame *_sheet = nullptr;
-+	QStackedWidget *_stack = nullptr;
-+	QLabel *_status = nullptr;
-+	QLabel *_qr = nullptr;
-+	QLineEdit *_phone = nullptr;
-+	QLineEdit *_code = nullptr;
-+	QLineEdit *_password = nullptr;
-+	QPushButton *_submit = nullptr;
-+	QTimer _qrTimer;
-+	Main::Account *_account = nullptr;
-+	std::unique_ptr<MTP::Sender> _api;
-+	std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
-+	mtpRequestId _requestId = 0;
-+	QByteArray _phoneHash;
-+	Core::CloudPasswordState _passwordState;
-+	bool _needPassword = false;
-+	int _passkeyDc = 0;
-+};
-+
-+QPushButton *MakeButton(const QString &text, QWidget *parent) {
-+	auto *button = new QPushButton(text, parent);
-+	return button;
-+}
-+
-+LoginSheet::LoginSheet(QFrame *sheet)
-+: QObject(sheet)
-+, _sheet(sheet) {
-+	BeginLoginSheet();
-+	_sheet->setObjectName(u"loginSheet"_q);
-+	_sheet->setStyleSheet(
-+		"QFrame#loginSheet{background:#1c2733;border:1px solid #3e5670;border-radius:14px;}"
-+		"QLabel{color:#e8f0f7;background:transparent;}"
-+		"QPushButton{background:#2b5278;color:#ffffff;border:0;border-radius:8px;padding:9px 12px;font-size:13px;}"
-+		"QPushButton:hover{background:#376890;}"
-+		"QLineEdit{background:#0e1621;color:#ffffff;border:1px solid #3e5670;border-radius:8px;padding:6px;font-size:13px;}");
-+	auto *outer = new QVBoxLayout(_sheet);
-+	outer->setContentsMargins(16, 16, 16, 16);
-+	_stack = new QStackedWidget(_sheet);
-+	outer->addWidget(_stack, 1);
-+	_status = new QLabel(_sheet);
-+	_status->setWordWrap(true);
-+	_status->setStyleSheet(u"color:#9bb0c3;font-size:12px;"_q);
-+	outer->addWidget(_status);
-+	_qrTimer.setSingleShot(true);
-+	connect(&_qrTimer, &QTimer::timeout, this, [=] { refreshQr(); });
-+	buildHome();
-+	buildQr();
-+	buildPhone();
-+	showPage(0);
-+}
-+
-+LoginSheet::~LoginSheet() {
-+	EndLoginSheet();
-+	*_alive = false;
-+	_qrTimer.stop();
-+	if (_api && _requestId) {
-+		_api->request(base::take(_requestId)).cancel();
-+	}
-+	if (_account && !_account->sessionExists()) {
-+		ReleaseAccount(_account);
-+		crl::on_main(&Core::App(), [] {
-+			if (Core::App().domain().started()) {
-+				Core::App().domain().removeRedundantAccounts();
-+			}
-+		});
-+	}
-+	_account = nullptr;
-+}
-+
-+void LoginSheet::showPage(int index) {
-+	_stack->setCurrentIndex(index);
-+	if (index != 1) {
-+		_qrTimer.stop();
-+	}
-+}
-+
-+void LoginSheet::setStatus(const QString &text) {
-+	_status->setText(text);
-+}
-+
-+bool LoginSheet::ensureAccount() {
-+	if (_account) {
-+		return true;
-+	}
-+	auto &domain = Core::App().domain();
-+	if (!domain.started()) {
-+		fail(QString::fromUtf8("客户端还没准备好"));
-+		return false;
-+	}
-+	// Do not remove accounts here. That runs inside the mouse click and
-+	// can destroy the window before this call returns.
-+	if (int(domain.accounts().size()) >= domain.maxAccounts()) {
-+		fail(QString::fromUtf8(
-+			"已达帐号上限 %1，先在控制面板调高").arg(domain.maxAccounts()));
-+		return false;
-+	}
-+	_account = domain.add(MTP::Environment{}).get();
-+	HoldAccount(_account);
-+	_api = std::make_unique<MTP::Sender>(&_account->mtp());
-+	return true;
-+}
-+
-+void LoginSheet::fail(const QString &text) {
-+	setStatus(text);
-+	Ui::Toast::Show(text);
-+}
-+
-+void LoginSheet::acceptAuth(const MTPauth_Authorization &auth) {
-+	auth.match([&](const MTPDauth_authorization &data) {
-+		const auto user = data.vuser();
-+		if (user.type() != mtpc_user || !user.c_user().is_self()) {
-+			fail(QString::fromUtf8("服务器没有返回可用的帐号"));
-+			return;
-+		}
-+		const auto id = UserId(user.c_user().vid());
-+		for (const auto &[index, existing] : Core::App().domain().accounts()) {
-+			(void)index;
-+			if (existing.get() == _account) {
-+				continue;
-+			}
-+			if (const auto session = existing->maybeSession()) {
-+				if (session->userId() == id) {
-+					ReleaseAccount(_account);
-+					const auto keep = existing.get();
-+					_account = nullptr;
-+					_sheet->deleteLater();
-+					keep->domain().activate(keep);
-+					return;
-+				}
-+			}
-+		}
-+		_account->createSession(
-+			user,
-+			std::make_unique<Main::SessionSettings>());
-+		_account->local().writeMtpData();
-+		const auto added = _account;
-+		ReleaseAccount(added);
-+		_sheet->deleteLater();
-+		added->domain().activate(added);
-+	}, [&](const MTPDauth_authorizationSignUpRequired &) {
-+		fail(QString::fromUtf8("这个号码还没注册"));
-+	});
-+}
-+
-+void LoginSheet::askPassword() {
-+	if (!ensureAccount()) {
-+		return;
-+	}
-+	_needPassword = true;
-+	_password->show();
-+	_password->setFocus();
-+	setStatus(QString::fromUtf8("这个号开了两步验证，输入密码后再点登录"));
-+	showPage(2);
-+	_requestId = _api->request(MTPaccount_GetPassword(
-+	)).done(crl::guard(this, [=](const MTPaccount_Password &result) {
-+		_requestId = 0;
-+		result.match([&](const MTPDaccount_password &data) {
-+			_passwordState = Core::ParseCloudPasswordState(data);
-+			if (!_passwordState.hasPassword) {
-+				fail(QString::fromUtf8("服务器没有给出密码校验"));
-+			}
-+		});
-+	})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+		_requestId = 0;
-+		fail(error.type());
-+	})).send();
-+}
-+
-+void LoginSheet::submitPassword() {
-+	if (!_passwordState.mtp.request) {
-+		fail(QString::fromUtf8("密码校验还没准备好"));
-+		return;
-+	}
-+	const auto password = _password->text().toUtf8();
-+	const auto hash = Core::ComputeCloudPasswordHash(
-+		_passwordState.mtp.request.algo,
-+		bytes::make_span(password));
-+	const auto check = Core::ComputeCloudPasswordCheck(
-+		_passwordState.mtp.request,
-+		hash);
-+	if (!check) {
-+		fail(QString::fromUtf8("这个客户端算不出这套密码"));
-+		return;
-+	}
-+	_passwordState.mtp.request.id = 0;
-+	_requestId = _api->request(
-+		MTPauth_CheckPassword(check.result)
-+	).done(crl::guard(this, [=](const MTPauth_Authorization &result) {
-+		_requestId = 0;
-+		acceptAuth(result);
-+	})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+		_requestId = 0;
-+		fail(error.type() == u"PASSWORD_HASH_INVALID"_q
-+			? QString::fromUtf8("密码不对")
-+			: error.type());
-+	})).send();
-+}
-+
-+void LoginSheet::showQrImage(const QByteArray &token) {
-+	auto link = QByteArray("tg://login?token=");
-+	link += token.toBase64(QByteArray::Base64UrlEncoding);
-+	const auto data = Qr::Encode(link, Qr::Redundancy::Quartile);
-+	if (data.size <= 0) {
-+		fail(QString::fromUtf8("二维码没有生成出来"));
-+		return;
-+	}
-+	const auto image = Qr::Generate(data, 8, Qt::black);
-+	_qr->setPixmap(QPixmap::fromImage(image).scaled(
-+		220,
-+		220,
-+		Qt::KeepAspectRatio,
-+		Qt::SmoothTransformation));
-+	setStatus(QString::fromUtf8("用已经登录的 Telegram 扫这个码"));
-+}
-+
-+void LoginSheet::handleToken(const MTPauth_LoginToken &result) {
-+	result.match([&](const MTPDauth_loginToken &data) {
-+		_requestId = 0;
-+		showQrImage(data.vtoken().v);
-+		const auto left = data.vexpires().v - base::unixtime::now();
-+		_qrTimer.start(std::max(left, 1) * crl::time(1000));
-+	}, [&](const MTPDauth_loginTokenMigrateTo &data) {
-+		_api->instance().setMainDcId(data.vdc_id().v);
-+		_requestId = _api->request(MTPauth_ImportLoginToken(
-+			MTP_bytes(data.vtoken().v)
-+		)).done(crl::guard(this, [=](const MTPauth_LoginToken &next) {
-+			handleToken(next);
-+		})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+			_requestId = 0;
-+			if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
-+				askPassword();
-+			} else {
-+				fail(error.type());
-+			}
-+		})).toDC(data.vdc_id().v).send();
-+	}, [&](const MTPDauth_loginTokenSuccess &data) {
-+		_requestId = 0;
-+		_qrTimer.stop();
-+		acceptAuth(data.vauthorization());
-+	});
-+}
-+
-+void LoginSheet::refreshQr() {
-+	if (!ensureAccount() || _requestId) {
-+		return;
-+	}
-+	setStatus(QString::fromUtf8("正在向服务器要二维码"));
-+	_requestId = _api->request(MTPauth_ExportLoginToken(
-+		MTP_int(ApiId),
-+		MTP_string(ApiHash),
-+		MTP_vector<MTPlong>(0)
-+	)).done(crl::guard(this, [=](const MTPauth_LoginToken &result) {
-+		handleToken(result);
-+	})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+		_requestId = 0;
-+		if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
-+			askPassword();
-+		} else {
-+			fail(error.type());
-+		}
-+	})).send();
-+}
-+
-+void LoginSheet::sendCode() {
-+	if (!ensureAccount()) {
-+		return;
-+	}
-+	auto phone = _phone->text();
-+	phone.remove(QChar(' '));
-+	phone.remove(QChar('-'));
-+	if (phone.startsWith(u"+"_q)) {
-+		phone.remove(0, 1);
-+	}
-+	if (phone.size() < 6) {
-+		fail(QString::fromUtf8("先输入手机号，带国家码"));
-+		return;
-+	}
-+	_api->instance().setUserPhone(phone);
-+	setStatus(QString::fromUtf8("正在发送验证码"));
-+	_requestId = _api->request(MTPauth_SendCode(
-+		MTP_string(phone),
-+		MTP_int(ApiId),
-+		MTP_string(ApiHash),
-+		MTP_codeSettings(
-+			MTP_flags(0),
-+			MTPVector<MTPbytes>(),
-+			MTPstring(),
-+			MTPBool())
-+	)).done(crl::guard(this, [=](const MTPauth_SentCode &result) {
-+		_requestId = 0;
-+		result.match([&](const MTPDauth_sentCode &data) {
-+			_phoneHash = data.vphone_code_hash().v;
-+			_code->show();
-+			_code->setFocus();
-+			setStatus(QString::fromUtf8("验证码已发送，填上后点登录"));
-+		}, [&](const MTPDauth_sentCodeSuccess &data) {
-+			acceptAuth(data.vauthorization());
-+		}, [&](const MTPDauth_sentCodePaymentRequired &) {
-+			fail(QString::fromUtf8("这个号码要先付费才能收验证码"));
-+		});
-+	})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+		_requestId = 0;
-+		const auto type = error.type();
-+		if (type.startsWith(u"PHONE_MIGRATE_"_q)) {
-+			const auto dc = type.mid(14).toInt();
-+			if (dc > 0) {
-+				_api->instance().setMainDcId(dc);
-+				sendCode();
-+				return;
-+			}
-+		}
-+		fail(type);
-+	})).send();
-+}
-+
-+void LoginSheet::signIn() {
-+	if (_needPassword) {
-+		submitPassword();
-+		return;
-+	}
-+	if (!ensureAccount()) {
-+		return;
-+	}
-+	if (_phoneHash.isEmpty()) {
-+		fail(QString::fromUtf8("先获取验证码"));
-+		return;
-+	}
-+	auto phone = _phone->text();
-+	phone.remove(QChar(' '));
-+	phone.remove(QChar('-'));
-+	if (phone.startsWith(u"+"_q)) {
-+		phone.remove(0, 1);
-+	}
-+	const auto code = _code->text().trimmed();
-+	if (code.isEmpty()) {
-+		fail(QString::fromUtf8("先填写验证码"));
-+		return;
-+	}
-+	_requestId = _api->request(MTPauth_SignIn(
-+		MTP_flags(MTPauth_SignIn::Flag::f_phone_code),
-+		MTP_string(phone),
-+		MTP_bytes(_phoneHash),
-+		MTP_string(code),
-+		MTP_emailVerificationCode(MTP_string())
-+	)).done(crl::guard(this, [=](const MTPauth_Authorization &result) {
-+		_requestId = 0;
-+		acceptAuth(result);
-+	})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+		_requestId = 0;
-+		if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
-+			askPassword();
-+		} else {
-+			fail(error.type());
-+		}
-+	})).send();
-+}
-+
-+void LoginSheet::startPasskey() {
-+	if (!ensureAccount()) {
-+		return;
-+	}
-+	if (!Platform::WebAuthn::IsSupported()) {
-+		fail(QString::fromUtf8("这台系统没有通行密钥"));
-+		return;
-+	}
-+	setStatus(QString::fromUtf8("正在调用系统通行密钥"));
-+	const auto initialDc = _api->instance().mainDcId();
-+	::Data::InitPasskeyLogin(*_api, crl::guard(this, [=](
-+			const ::Data::Passkey::LoginData &loginData) {
-+		_passkeyDc = initialDc;
-+		Platform::WebAuthn::Login(loginData, crl::guard(this, [=](
-+				Platform::WebAuthn::LoginResult result) {
-+			if (result.userHandle.isEmpty()) {
-+				if (result.error == Platform::WebAuthn::Error::UnsignedBuild) {
-+					fail(QString::fromUtf8(
-+						"通行密钥要求应用有系统签名，这个包还没签"));
-+				} else if (result.error == Platform::WebAuthn::Error::Cancelled) {
-+					setStatus(QString::fromUtf8("已取消通行密钥"));
-+				} else {
-+					fail(QString::fromUtf8("通行密钥没有完成"));
-+				}
-+				return;
-+			}
-+			::Data::FinishPasskeyLogin(
-+				*_api,
-+				_passkeyDc,
-+				result,
-+				crl::guard(this, [=](const MTPauth_Authorization &auth) {
-+					acceptAuth(auth);
-+				}),
-+				crl::guard(this, [=](QString error) {
-+					if (error == u"SESSION_PASSWORD_NEEDED"_q) {
-+						askPassword();
-+					} else {
-+						fail(error);
-+					}
-+				}));
-+		}));
-+	}));
-+}
-+
-+void LoginSheet::buildHome() {
-+	auto *page = new QWidget(_stack);
-+	auto *layout = new QVBoxLayout(page);
-+	layout->setContentsMargins(0, 0, 0, 0);
-+	layout->setSpacing(8);
-+	auto *title = new QLabel(QString::fromUtf8("添加帐号"), page);
-+	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
-+	auto *hint = new QLabel(QString::fromUtf8(
-+		"二维码、手机号、通行密钥都在这个窗口里完成。"), page);
-+	hint->setWordWrap(true);
-+	layout->addWidget(title);
-+	layout->addWidget(hint);
-+	const auto button = [&](const QString &text) {
-+		auto *widget = MakeButton(text, page);
-+		layout->addWidget(widget);
-+		return widget;
-+	};
-+	connect(button(QString::fromUtf8("二维码")), &QPushButton::clicked, this, [=] {
-+		showPage(1);
-+		setStatus(QString::fromUtf8("正在向服务器要二维码"));
-+		// domain.add / MTP inside this click calls AppKit before mouseUp
-+		// and the process never returns.
-+		QTimer::singleShot(0, this, [=] { refreshQr(); });
-+	});
-+	connect(button(QString::fromUtf8("手机号")), &QPushButton::clicked, this, [=] {
-+		showPage(2);
-+		QTimer::singleShot(0, this, [=] {
-+			_phone->setFocus();
-+			setStatus(QString::fromUtf8("输入手机号，点获取验证码"));
-+		});
-+	});
-+	connect(button(QString::fromUtf8("通行密钥")), &QPushButton::clicked, this, [=] {
-+		QTimer::singleShot(0, this, [=] { startPasskey(); });
-+	});
-+	connect(button(QString::fromUtf8("导入压缩包")), &QPushButton::clicked, this, [=] {
-+		_sheet->deleteLater();
-+		QTimer::singleShot(0, &Core::App(), [] {
-+			ChooseAndImportAccountPack(nullptr, &Core::App().domain());
-+		});
-+	});
-+	connect(button(QString::fromUtf8("关闭")), &QPushButton::clicked, this, [=] {
-+		_sheet->deleteLater();
-+	});
-+	layout->addStretch(1);
-+	_stack->addWidget(page);
-+}
-+
-+void LoginSheet::buildQr() {
-+	auto *page = new QWidget(_stack);
-+	auto *layout = new QVBoxLayout(page);
-+	layout->setContentsMargins(0, 0, 0, 0);
-+	layout->setSpacing(8);
-+	auto *title = new QLabel(QString::fromUtf8("扫码登录"), page);
-+	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
-+	_qr = new QLabel(page);
-+	_qr->setFixedSize(220, 220);
-+	_qr->setAlignment(Qt::AlignCenter);
-+	_qr->setStyleSheet(u"background:#ffffff;border-radius:8px;"_q);
-+	layout->addWidget(title);
-+	layout->addWidget(_qr, 0, Qt::AlignHCenter);
-+	auto *back = MakeButton(QString::fromUtf8("返回"), page);
-+	layout->addWidget(back);
-+	layout->addStretch(1);
-+	connect(back, &QPushButton::clicked, this, [=] {
-+		_qrTimer.stop();
-+		if (_api && _requestId) {
-+			_api->request(base::take(_requestId)).cancel();
-+		}
-+		showPage(0);
-+		setStatus(QString());
-+	});
-+	_stack->addWidget(page);
-+}
-+
-+void LoginSheet::buildPhone() {
-+	auto *page = new QWidget(_stack);
-+	auto *layout = new QVBoxLayout(page);
-+	layout->setContentsMargins(0, 0, 0, 0);
-+	layout->setSpacing(8);
-+	auto *title = new QLabel(QString::fromUtf8("手机号登录"), page);
-+	title->setStyleSheet(u"font-size:16px;font-weight:600;"_q);
-+	_phone = new QLineEdit(page);
-+	_phone->setPlaceholderText(QString::fromUtf8("手机号，带国家码，例如 8613800138000"));
-+	_code = new QLineEdit(page);
-+	_code->setPlaceholderText(QString::fromUtf8("验证码"));
-+	_password = new QLineEdit(page);
-+	_password->setEchoMode(QLineEdit::Password);
-+	_password->setPlaceholderText(QString::fromUtf8("两步验证密码"));
-+	_password->hide();
-+	layout->addWidget(title);
-+	layout->addWidget(_phone);
-+	layout->addWidget(_code);
-+	layout->addWidget(_password);
-+	const auto codeButton = MakeButton(QString::fromUtf8("获取验证码"), page);
-+	_submit = MakeButton(QString::fromUtf8("登录"), page);
-+	const auto back = MakeButton(QString::fromUtf8("返回"), page);
-+	layout->addWidget(codeButton);
-+	layout->addWidget(_submit);
-+	layout->addWidget(back);
-+	layout->addStretch(1);
-+	connect(codeButton, &QPushButton::clicked, this, [=] {
-+		setStatus(QString::fromUtf8("正在发送验证码"));
-+		QTimer::singleShot(0, this, [=] { sendCode(); });
-+	});
-+	connect(_submit, &QPushButton::clicked, this, [=] {
-+		QTimer::singleShot(0, this, [=] { signIn(); });
-+	});
-+	connect(back, &QPushButton::clicked, this, [=] {
-+		_needPassword = false;
-+		_password->hide();
-+		showPage(0);
-+		setStatus(QString());
-+	});
-+	_stack->addWidget(page);
-+}
-+
-+} // namespace
-+
-+QWidget *CreateLoginSheet(QWidget *host) {
-+	auto *sheet = new QFrame(host);
-+	new LoginSheet(sheet);
-+	return sheet;
-+}
-+
-+} // namespace Custom
-diff --git a/Telegram/SourceFiles/custom/custom_login.h b/Telegram/SourceFiles/custom/custom_login.h
-new file mode 100644
-index 0000000..0c1d62d
---- /dev/null
-+++ b/Telegram/SourceFiles/custom/custom_login.h
-@@ -0,0 +1,10 @@
-+#pragma once
-+
-+class QWidget;
-+
-+namespace Custom {
-+
-+// Small sheet on the current window. QR, phone, and passkey stay here.
-+[[nodiscard]] QWidget *CreateLoginSheet(QWidget *host);
-+
-+} // namespace Custom
