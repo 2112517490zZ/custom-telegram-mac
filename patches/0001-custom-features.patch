@@ -3994,14 +3994,15 @@ index 0000000..3462cd3
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_login.cpp b/Telegram/SourceFiles/custom/custom_login.cpp
 new file mode 100644
-index 0000000..4e5c885
+index 0000000..108b564
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_login.cpp
-@@ -0,0 +1,586 @@
+@@ -0,0 +1,919 @@
 +#include "custom/custom_login.h"
 +
 +#include "config.h"
 +#include "base/algorithm.h"
++#include "base/random.h"
 +#include "base/unixtime.h"
 +#include "core/application.h"
 +#include "data/data_peer_id.h"
@@ -4019,6 +4020,7 @@ index 0000000..4e5c885
 +#include "mtproto/sender.h"
 +#include "platform/platform_webauthn.h"
 +#include "qr/qr_generate.h"
++#include "rpl/lifetime.h"
 +#include "ui/toast/toast.h"
 +
 +#include <crl/crl.h>
@@ -4035,6 +4037,13 @@ index 0000000..4e5c885
 +namespace Custom {
 +namespace {
 +
++enum class LoginFlow {
++	None,
++	Qr,
++	Phone,
++	Passkey,
++};
++
 +class LoginSheet final : public QObject {
 +public:
 +	explicit LoginSheet(QFrame *sheet);
@@ -4046,17 +4055,26 @@ index 0000000..4e5c885
 +	void buildPhone();
 +	void showPage(int index);
 +	void setStatus(const QString &text);
++	void dropPendingAccount();
 +	bool ensureAccount();
-+	void refreshQr();
++	bool ensureAccountFor(LoginFlow flow);
++	void watchUpdates();
++	void handleUpdates(const MTPUpdates &updates);
++	void handleUpdate(const MTPUpdate &update);
++	void refreshQr(bool confirming = false);
 +	void handleToken(const MTPauth_LoginToken &result);
++	void showTokenError(const MTP::Error &error);
 +	void acceptAuth(const MTPauth_Authorization &auth);
 +	void fail(const QString &text);
-+	void askPassword();
++	[[nodiscard]] bool isAuthTokenError(const QString &type) const;
++	[[nodiscard]] QString explain(const QString &type) const;
++	void askPassword(bool resubmit = false);
 +	void submitPassword();
 +	void sendCode();
 +	void signIn();
 +	void startPasskey();
 +	void showQrImage(const QByteArray &token);
++	[[nodiscard]] QLineEdit *passwordField() const;
 +
 +	QFrame *_sheet = nullptr;
 +	QStackedWidget *_stack = nullptr;
@@ -4065,15 +4083,27 @@ index 0000000..4e5c885
 +	QLineEdit *_phone = nullptr;
 +	QLineEdit *_code = nullptr;
 +	QLineEdit *_password = nullptr;
++	QLineEdit *_qrPassword = nullptr;
++	QLineEdit *_activePassword = nullptr;
 +	QPushButton *_submit = nullptr;
++	QPushButton *_qrSubmit = nullptr;
 +	QTimer _qrTimer;
 +	Main::Account *_account = nullptr;
 +	std::unique_ptr<MTP::Sender> _api;
++	rpl::lifetime _updatesLifetime;
 +	std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
 +	mtpRequestId _requestId = 0;
 +	QByteArray _phoneHash;
 +	Core::CloudPasswordState _passwordState;
++	LoginFlow _flow = LoginFlow::None;
++	LoginFlow _accountFlow = LoginFlow::None;
++	crl::time _srpInvalidAt = 0;
++	int _generation = 0;
++	int _tokenRetries = 0;
++	bool _hasQr = false;
 +	bool _needPassword = false;
++	bool _passwordPending = false;
++	bool _forceRefresh = false;
 +	int _passkeyDc = 0;
 +};
 +
@@ -4112,6 +4142,8 @@ index 0000000..4e5c885
 +LoginSheet::~LoginSheet() {
 +	EndLoginSheet();
 +	*_alive = false;
++	++_generation;
++	_updatesLifetime.destroy();
 +	_qrTimer.stop();
 +	if (_api && _requestId) {
 +		_api->request(base::take(_requestId)).cancel();
@@ -4138,6 +4170,54 @@ index 0000000..4e5c885
 +	_status->setText(text);
 +}
 +
++void LoginSheet::dropPendingAccount() {
++	++_generation;
++	_updatesLifetime.destroy();
++	_qrTimer.stop();
++	_forceRefresh = false;
++	_passwordPending = false;
++	_needPassword = false;
++	_tokenRetries = 0;
++	_srpInvalidAt = 0;
++	_phoneHash.clear();
++	_passwordState = {};
++	_accountFlow = LoginFlow::None;
++	_activePassword = nullptr;
++	_hasQr = false;
++	if (_qr) {
++		_qr->clear();
++	}
++	if (_api && _requestId) {
++		_api->request(base::take(_requestId)).cancel();
++	}
++	_requestId = 0;
++	if (_password) {
++		_password->hide();
++		_password->clear();
++	}
++	if (_qrPassword) {
++		_qrPassword->hide();
++		_qrPassword->clear();
++	}
++	if (_qrSubmit) {
++		_qrSubmit->hide();
++	}
++	if (!_account || _account->sessionExists()) {
++		if (!_account) {
++			_api.reset();
++		}
++		return;
++	}
++	ReleaseAccount(_account);
++	_account = nullptr;
++	_api.reset();
++	crl::on_main(&Core::App(), [] {
++		if (Core::App().domain().started()) {
++			Core::App().domain().removeRedundantAccounts();
++		}
++	});
++}
++
 +bool LoginSheet::ensureAccount() {
 +	if (_account) {
 +		return true;
@@ -4157,12 +4237,89 @@ index 0000000..4e5c885
 +	_account = domain.add(MTP::Environment{}).get();
 +	HoldAccount(_account);
 +	_api = std::make_unique<MTP::Sender>(&_account->mtp());
++	watchUpdates();
 +	return true;
++}
++
++bool LoginSheet::ensureAccountFor(LoginFlow flow) {
++	if (_account && _accountFlow != flow && !_account->sessionExists()) {
++		dropPendingAccount();
++	}
++	if (!ensureAccount()) {
++		return false;
++	}
++	_accountFlow = flow;
++	return true;
++}
++
++void LoginSheet::watchUpdates() {
++	_updatesLifetime.destroy();
++	if (!_account) {
++		return;
++	}
++	_account->mtpUpdates(
++	) | rpl::on_next([=](const MTPUpdates &updates) {
++		handleUpdates(updates);
++	}, _updatesLifetime);
++}
++
++void LoginSheet::handleUpdates(const MTPUpdates &updates) {
++	updates.match([&](const MTPDupdateShort &data) {
++		handleUpdate(data.vupdate());
++	}, [&](const MTPDupdates &data) {
++		for (const auto &update : data.vupdates().v) {
++			handleUpdate(update);
++		}
++	}, [&](const MTPDupdatesCombined &data) {
++		for (const auto &update : data.vupdates().v) {
++			handleUpdate(update);
++		}
++	}, [](const auto &) {});
++}
++
++void LoginSheet::handleUpdate(const MTPUpdate &update) {
++	update.match([&](const MTPDupdateLoginToken &) {
++		if (_flow != LoginFlow::Qr || _passwordPending) {
++			return;
++		}
++		if (_requestId) {
++			_forceRefresh = true;
++		} else {
++			_qrTimer.stop();
++			refreshQr();
++		}
++	}, [](const auto &) {});
 +}
 +
 +void LoginSheet::fail(const QString &text) {
 +	setStatus(text);
 +	Ui::Toast::Show(text);
++}
++
++bool LoginSheet::isAuthTokenError(const QString &type) const {
++	return type == u"AUTH_TOKEN_EXPIRED"_q
++		|| type == u"AUTH_TOKEN_INVALID"_q
++		|| type == u"AUTH_TOKEN_ALREADY_ACCEPTED"_q;
++}
++
++QString LoginSheet::explain(const QString &type) const {
++	if (type == u"PASSWORD_HASH_INVALID"_q) {
++		return QString::fromUtf8("密码不对");
++	}
++	if (type == u"PHONE_CODE_INVALID"_q || type == u"PHONE_CODE_EMPTY"_q) {
++		return QString::fromUtf8("验证码不对");
++	}
++	if (type == u"PHONE_CODE_EXPIRED"_q) {
++		return QString::fromUtf8("验证码过期了，重新获取");
++	}
++	if (isAuthTokenError(type)) {
++		return QString::fromUtf8("登录口令失效了（%1）").arg(type);
++	}
++	return type;
++}
++
++QLineEdit *LoginSheet::passwordField() const {
++	return _activePassword ? _activePassword : _password;
 +}
 +
 +void LoginSheet::acceptAuth(const MTPauth_Authorization &auth) {
@@ -4202,36 +4359,66 @@ index 0000000..4e5c885
 +	});
 +}
 +
-+void LoginSheet::askPassword() {
++void LoginSheet::askPassword(bool resubmit) {
 +	if (!ensureAccount()) {
 +		return;
 +	}
 +	_needPassword = true;
-+	_password->show();
-+	_password->setFocus();
++	_passwordPending = true;
++	_qrTimer.stop();
++	_forceRefresh = false;
++	const auto onQr = (_flow == LoginFlow::Qr && _qrPassword);
++	_activePassword = onQr ? _qrPassword : _password;
++	if (_activePassword) {
++		_activePassword->show();
++		_activePassword->setFocus();
++	}
++	if (onQr && _qrSubmit) {
++		_qrSubmit->show();
++	}
 +	setStatus(QString::fromUtf8("这个号开了两步验证，输入密码后再点登录"));
-+	showPage(2);
++	if (!onQr) {
++		showPage(2);
++	}
++	const auto generation = _generation;
 +	_requestId = _api->request(MTPaccount_GetPassword(
 +	)).done(crl::guard(this, [=](const MTPaccount_Password &result) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
 +		result.match([&](const MTPDaccount_password &data) {
++			base::RandomAddSeed(bytes::make_span(data.vsecure_random().v));
 +			_passwordState = Core::ParseCloudPasswordState(data);
 +			if (!_passwordState.hasPassword) {
 +				fail(QString::fromUtf8("服务器没有给出密码校验"));
++			} else if (resubmit) {
++				submitPassword();
 +			}
 +		});
 +	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
-+		fail(error.type());
++		fail(explain(error.type()));
 +	})).send();
 +}
 +
 +void LoginSheet::submitPassword() {
-+	if (!_passwordState.mtp.request) {
-+		fail(QString::fromUtf8("密码校验还没准备好"));
++	if (_requestId) {
 +		return;
 +	}
-+	const auto password = _password->text().toUtf8();
++	if (!_passwordState.mtp.request) {
++		fail(QString::fromUtf8("密码校验还没准备好，等一下再点"));
++		return;
++	}
++	const auto field = passwordField();
++	const auto password = field ? field->text().toUtf8() : QByteArray();
++	if (password.isEmpty()) {
++		fail(QString::fromUtf8("先输入两步验证密码"));
++		return;
++	}
 +	const auto hash = Core::ComputeCloudPasswordHash(
 +		_passwordState.mtp.request.algo,
 +		bytes::make_span(password));
@@ -4243,16 +4430,64 @@ index 0000000..4e5c885
 +		return;
 +	}
 +	_passwordState.mtp.request.id = 0;
++	const auto generation = _generation;
++	const auto flow = _flow;
 +	_requestId = _api->request(
 +		MTPauth_CheckPassword(check.result)
 +	).done(crl::guard(this, [=](const MTPauth_Authorization &result) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
 +		acceptAuth(result);
 +	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
-+		fail(error.type() == u"PASSWORD_HASH_INVALID"_q
-+			? QString::fromUtf8("密码不对")
-+			: error.type());
++		const auto type = error.type();
++		if (type == u"SRP_ID_INVALID"_q) {
++			const auto now = crl::now();
++			if (_srpInvalidAt
++				&& now - _srpInvalidAt < Core::kHandleSrpIdInvalidTimeout) {
++				fail(QString::fromUtf8("服务器拒绝了这次密码校验"));
++				return;
++			}
++			_srpInvalidAt = now;
++			_passwordState = {};
++			askPassword(true);
++			return;
++		}
++		if (isAuthTokenError(type)) {
++			_needPassword = false;
++			_passwordPending = false;
++			_passwordState = {};
++			if (field) {
++				field->clear();
++			}
++			if (flow == LoginFlow::Qr) {
++				if (_qrSubmit) {
++					_qrSubmit->hide();
++				}
++				if (_qrPassword) {
++					_qrPassword->hide();
++				}
++				setStatus(QString::fromUtf8(
++					"两步验证会话失效了（%1），请再扫一次").arg(type));
++				refreshQr();
++			} else {
++				fail(QString::fromUtf8(
++					"登录会话失效了（%1），请重新获取验证码").arg(type));
++				_phoneHash.clear();
++				if (_password) {
++					_password->hide();
++				}
++				dropPendingAccount();
++				_flow = LoginFlow::Phone;
++			}
++			return;
++		}
++		fail(explain(type));
 +	})).send();
 +}
 +
@@ -4270,59 +4505,110 @@ index 0000000..4e5c885
 +		220,
 +		Qt::KeepAspectRatio,
 +		Qt::SmoothTransformation));
-+	setStatus(QString::fromUtf8("用已经登录的 Telegram 扫这个码"));
++	_tokenRetries = 0;
++	_hasQr = true;
++	if (!_passwordPending) {
++		setStatus(QString::fromUtf8(
++			"用已经登录的 Telegram 扫这个码。开了两步验证的号，扫完会在这里要密码"));
++	}
++}
++
++void LoginSheet::showTokenError(const MTP::Error &error) {
++	_requestId = 0;
++	if (_passwordPending) {
++		return;
++	}
++	const auto type = error.type();
++	if (type == u"SESSION_PASSWORD_NEEDED"_q) {
++		_forceRefresh = false;
++		askPassword();
++	} else if (base::take(_forceRefresh)) {
++		refreshQr(true);
++	} else if (isAuthTokenError(type)) {
++		if (_tokenRetries >= 1) {
++			fail(QString::fromUtf8(
++				"二维码失效了（%1），点返回再打开一次").arg(type));
++			return;
++		}
++		++_tokenRetries;
++		setStatus(QString::fromUtf8(
++			"二维码失效了（%1），正在换一个，请再扫一次").arg(type));
++		refreshQr();
++	} else {
++		fail(explain(type));
++	}
 +}
 +
 +void LoginSheet::handleToken(const MTPauth_LoginToken &result) {
 +	result.match([&](const MTPDauth_loginToken &data) {
 +		_requestId = 0;
++		if (_passwordPending) {
++			return;
++		}
 +		showQrImage(data.vtoken().v);
-+		const auto left = data.vexpires().v - base::unixtime::now();
-+		_qrTimer.start(std::max(left, 1) * crl::time(1000));
++		if (base::take(_forceRefresh)) {
++			refreshQr(true);
++		} else {
++			const auto left = data.vexpires().v - base::unixtime::now();
++			_qrTimer.start(std::max(left, 1) * crl::time(1000));
++		}
 +	}, [&](const MTPDauth_loginTokenMigrateTo &data) {
++		_qrTimer.stop();
 +		_api->instance().setMainDcId(data.vdc_id().v);
++		const auto generation = _generation;
 +		_requestId = _api->request(MTPauth_ImportLoginToken(
 +			MTP_bytes(data.vtoken().v)
 +		)).done(crl::guard(this, [=](const MTPauth_LoginToken &next) {
++			if (generation != _generation) {
++				return;
++			}
 +			handleToken(next);
 +		})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+			_requestId = 0;
-+			if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
-+				askPassword();
-+			} else {
-+				fail(error.type());
++			if (generation != _generation) {
++				return;
 +			}
++			showTokenError(error);
 +		})).toDC(data.vdc_id().v).send();
 +	}, [&](const MTPDauth_loginTokenSuccess &data) {
 +		_requestId = 0;
 +		_qrTimer.stop();
++		_forceRefresh = false;
 +		acceptAuth(data.vauthorization());
 +	});
 +}
 +
-+void LoginSheet::refreshQr() {
-+	if (!ensureAccount() || _requestId) {
++void LoginSheet::refreshQr(bool confirming) {
++	if (_flow != LoginFlow::Qr || _passwordPending) {
 +		return;
 +	}
-+	setStatus(QString::fromUtf8("正在向服务器要二维码"));
++	if (!ensureAccountFor(LoginFlow::Qr) || _requestId) {
++		return;
++	}
++	if (confirming) {
++		setStatus(QString::fromUtf8("手机已确认，正在登录"));
++	} else if (!_hasQr) {
++		setStatus(QString::fromUtf8("正在向服务器要二维码"));
++	}
++	const auto generation = _generation;
 +	_requestId = _api->request(MTPauth_ExportLoginToken(
 +		MTP_int(ApiId),
 +		MTP_string(ApiHash),
 +		MTP_vector<MTPlong>(0)
 +	)).done(crl::guard(this, [=](const MTPauth_LoginToken &result) {
++		if (generation != _generation) {
++			return;
++		}
 +		handleToken(result);
 +	})).fail(crl::guard(this, [=](const MTP::Error &error) {
-+		_requestId = 0;
-+		if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
-+			askPassword();
-+		} else {
-+			fail(error.type());
++		if (generation != _generation) {
++			return;
 +		}
++		showTokenError(error);
 +	})).send();
 +}
 +
 +void LoginSheet::sendCode() {
-+	if (!ensureAccount()) {
++	if (!ensureAccountFor(LoginFlow::Phone) || _requestId) {
 +		return;
 +	}
 +	auto phone = _phone->text();
@@ -4337,6 +4623,7 @@ index 0000000..4e5c885
 +	}
 +	_api->instance().setUserPhone(phone);
 +	setStatus(QString::fromUtf8("正在发送验证码"));
++	const auto generation = _generation;
 +	_requestId = _api->request(MTPauth_SendCode(
 +		MTP_string(phone),
 +		MTP_int(ApiId),
@@ -4347,6 +4634,9 @@ index 0000000..4e5c885
 +			MTPstring(),
 +			MTPBool())
 +	)).done(crl::guard(this, [=](const MTPauth_SentCode &result) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
 +		result.match([&](const MTPDauth_sentCode &data) {
 +			_phoneHash = data.vphone_code_hash().v;
@@ -4359,6 +4649,9 @@ index 0000000..4e5c885
 +			fail(QString::fromUtf8("这个号码要先付费才能收验证码"));
 +		});
 +	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
 +		const auto type = error.type();
 +		if (type.startsWith(u"PHONE_MIGRATE_"_q)) {
@@ -4369,7 +4662,7 @@ index 0000000..4e5c885
 +				return;
 +			}
 +		}
-+		fail(type);
++		fail(explain(type));
 +	})).send();
 +}
 +
@@ -4378,7 +4671,7 @@ index 0000000..4e5c885
 +		submitPassword();
 +		return;
 +	}
-+	if (!ensureAccount()) {
++	if (!ensureAccountFor(LoginFlow::Phone) || _requestId) {
 +		return;
 +	}
 +	if (_phoneHash.isEmpty()) {
@@ -4396,6 +4689,7 @@ index 0000000..4e5c885
 +		fail(QString::fromUtf8("先填写验证码"));
 +		return;
 +	}
++	const auto generation = _generation;
 +	_requestId = _api->request(MTPauth_SignIn(
 +		MTP_flags(MTPauth_SignIn::Flag::f_phone_code),
 +		MTP_string(phone),
@@ -4403,20 +4697,26 @@ index 0000000..4e5c885
 +		MTP_string(code),
 +		MTP_emailVerificationCode(MTP_string())
 +	)).done(crl::guard(this, [=](const MTPauth_Authorization &result) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
 +		acceptAuth(result);
 +	})).fail(crl::guard(this, [=](const MTP::Error &error) {
++		if (generation != _generation) {
++			return;
++		}
 +		_requestId = 0;
 +		if (error.type() == u"SESSION_PASSWORD_NEEDED"_q) {
 +			askPassword();
 +		} else {
-+			fail(error.type());
++			fail(explain(error.type()));
 +		}
 +	})).send();
 +}
 +
 +void LoginSheet::startPasskey() {
-+	if (!ensureAccount()) {
++	if (!ensureAccountFor(LoginFlow::Passkey)) {
 +		return;
 +	}
 +	if (!Platform::WebAuthn::IsSupported()) {
@@ -4452,7 +4752,7 @@ index 0000000..4e5c885
 +					if (error == u"SESSION_PASSWORD_NEEDED"_q) {
 +						askPassword();
 +					} else {
-+						fail(error);
++						fail(explain(error));
 +					}
 +				}));
 +		}));
@@ -4477,21 +4777,35 @@ index 0000000..4e5c885
 +		return widget;
 +	};
 +	connect(button(QString::fromUtf8("二维码")), &QPushButton::clicked, this, [=] {
++		_flow = LoginFlow::Qr;
 +		showPage(1);
 +		setStatus(QString::fromUtf8("正在向服务器要二维码"));
 +		// domain.add / MTP inside this click calls AppKit before mouseUp
 +		// and the process never returns.
-+		QTimer::singleShot(0, this, [=] { refreshQr(); });
++		QTimer::singleShot(0, this, [=] {
++			if (_flow == LoginFlow::Qr) {
++				refreshQr();
++			}
++		});
 +	});
 +	connect(button(QString::fromUtf8("手机号")), &QPushButton::clicked, this, [=] {
++		_flow = LoginFlow::Phone;
 +		showPage(2);
 +		QTimer::singleShot(0, this, [=] {
++			if (_flow != LoginFlow::Phone) {
++				return;
++			}
 +			_phone->setFocus();
 +			setStatus(QString::fromUtf8("输入手机号，点获取验证码"));
 +		});
 +	});
 +	connect(button(QString::fromUtf8("通行密钥")), &QPushButton::clicked, this, [=] {
-+		QTimer::singleShot(0, this, [=] { startPasskey(); });
++		_flow = LoginFlow::Passkey;
++		QTimer::singleShot(0, this, [=] {
++			if (_flow == LoginFlow::Passkey) {
++				startPasskey();
++			}
++		});
 +	});
 +	connect(button(QString::fromUtf8("导入压缩包")), &QPushButton::clicked, this, [=] {
 +		_sheet->deleteLater();
@@ -4517,18 +4831,31 @@ index 0000000..4e5c885
 +	_qr->setFixedSize(220, 220);
 +	_qr->setAlignment(Qt::AlignCenter);
 +	_qr->setStyleSheet(u"background:#ffffff;border-radius:8px;"_q);
++	_qrPassword = new QLineEdit(page);
++	_qrPassword->setEchoMode(QLineEdit::Password);
++	_qrPassword->setPlaceholderText(QString::fromUtf8("两步验证密码"));
++	_qrPassword->hide();
++	_qrSubmit = MakeButton(QString::fromUtf8("确认密码"), page);
++	_qrSubmit->hide();
 +	layout->addWidget(title);
 +	layout->addWidget(_qr, 0, Qt::AlignHCenter);
++	layout->addWidget(_qrPassword);
++	layout->addWidget(_qrSubmit);
 +	auto *back = MakeButton(QString::fromUtf8("返回"), page);
 +	layout->addWidget(back);
 +	layout->addStretch(1);
++	connect(_qrSubmit, &QPushButton::clicked, this, [=] {
++		QTimer::singleShot(0, this, [=] { submitPassword(); });
++	});
++	connect(_qrPassword, &QLineEdit::returnPressed, this, [=] {
++		QTimer::singleShot(0, this, [=] { submitPassword(); });
++	});
 +	connect(back, &QPushButton::clicked, this, [=] {
++		_flow = LoginFlow::None;
 +		_qrTimer.stop();
-+		if (_api && _requestId) {
-+			_api->request(base::take(_requestId)).cancel();
-+		}
 +		showPage(0);
 +		setStatus(QString());
++		QTimer::singleShot(0, this, [=] { dropPendingAccount(); });
 +	});
 +	_stack->addWidget(page);
 +}
@@ -4560,17 +4887,23 @@ index 0000000..4e5c885
 +	layout->addWidget(back);
 +	layout->addStretch(1);
 +	connect(codeButton, &QPushButton::clicked, this, [=] {
++		_flow = LoginFlow::Phone;
 +		setStatus(QString::fromUtf8("正在发送验证码"));
 +		QTimer::singleShot(0, this, [=] { sendCode(); });
 +	});
 +	connect(_submit, &QPushButton::clicked, this, [=] {
 +		QTimer::singleShot(0, this, [=] { signIn(); });
 +	});
++	connect(_password, &QLineEdit::returnPressed, this, [=] {
++		QTimer::singleShot(0, this, [=] { signIn(); });
++	});
 +	connect(back, &QPushButton::clicked, this, [=] {
++		_flow = LoginFlow::None;
 +		_needPassword = false;
 +		_password->hide();
 +		showPage(0);
 +		setStatus(QString());
++		QTimer::singleShot(0, this, [=] { dropPendingAccount(); });
 +	});
 +	_stack->addWidget(page);
 +}
