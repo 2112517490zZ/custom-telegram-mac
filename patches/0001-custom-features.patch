@@ -410,10 +410,10 @@ index 9a194cc..7172a99 100644
  [[nodiscard]] FnMut<bool()> RequestHandler(Command command);
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.cpp b/Telegram/SourceFiles/custom/custom_account_rail.cpp
 new file mode 100644
-index 0000000..7753b2b
+index 0000000..5c467b3
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.cpp
-@@ -0,0 +1,514 @@
+@@ -0,0 +1,638 @@
 +#include "custom/custom_account_rail.h"
 +
 +#include "core/application.h"
@@ -430,8 +430,10 @@ index 0000000..7753b2b
 +#include "main/main_session.h"
 +#include "mainwindow.h"
 +#include "ui/ui_utility.h"
++#include "window/window_controller.h"
 +#include "window/window_session_controller.h"
 +
++#include <algorithm>
 +#include <array>
 +#include <cmath>
 +
@@ -444,6 +446,7 @@ index 0000000..7753b2b
 +#include <QtWidgets/QFrame>
 +#include <QtWidgets/QLabel>
 +#include <QtWidgets/QLineEdit>
++#include <QtWidgets/QMenu>
 +#include <QtWidgets/QPlainTextEdit>
 +#include <QtWidgets/QPushButton>
 +#include <QtWidgets/QScrollArea>
@@ -478,10 +481,24 @@ index 0000000..7753b2b
 +	: QPushButton(parent)
 +	, _name(name)
 +	, _unread(unread)
-+	, _active(active) {
++	, _active(active)
++	, _up(new QPushButton(QString::fromUtf8("▲"), this))
++	, _down(new QPushButton(QString::fromUtf8("▼"), this)) {
 +		setCursor(Qt::PointingHandCursor);
 +		setFixedHeight(64);
 +		setToolTip(name);
++		const auto tiny = QString(
++			"QPushButton{background:transparent;color:#c5d3de;border:0;"
++			"font-size:9px;padding:0;}"
++			"QPushButton:hover{color:#ffffff;}");
++		_up->setStyleSheet(tiny);
++		_down->setStyleSheet(tiny);
++		_up->setCursor(Qt::PointingHandCursor);
++		_down->setCursor(Qt::PointingHandCursor);
++		_up->setFocusPolicy(Qt::NoFocus);
++		_down->setFocusPolicy(Qt::NoFocus);
++		_up->setToolTip(QString::fromUtf8("上移"));
++		_down->setToolTip(QString::fromUtf8("下移"));
 +	}
 +
 +	void setUnread(int unread) {
@@ -500,14 +517,26 @@ index 0000000..7753b2b
 +		update();
 +	}
 +
++	[[nodiscard]] QPushButton *upButton() const {
++		return _up;
++	}
++	[[nodiscard]] QPushButton *downButton() const {
++		return _down;
++	}
++
 +protected:
++	void resizeEvent(QResizeEvent *) override {
++		_up->setGeometry(width() - 16, 8, 14, 16);
++		_down->setGeometry(width() - 16, 24, 14, 16);
++	}
++
 +	void paintEvent(QPaintEvent *) override {
 +		auto p = QPainter(this);
 +		if (_active || underMouse()) {
 +			p.fillRect(rect(), QColor(53, 80, 106));
 +		}
 +		const auto size = 42;
-+		const auto left = (width() - size) / 2;
++		const auto left = (width() - size) / 2 - 4;
 +		const auto top = 6 - _hop;
 +		p.setRenderHint(QPainter::Antialiasing);
 +		p.setPen(Qt::NoPen);
@@ -521,17 +550,18 @@ index 0000000..7753b2b
 +			_name.left(1).toUpper());
 +		if (_unread > 0) {
 +			p.setBrush(QColor(229, 57, 53));
-+			p.drawEllipse(left + size - 14, top - 1, 16, 16);
++			p.drawEllipse(left + size - 16, top - 2, 18, 18);
++			p.setPen(Qt::white);
 +			p.setFont(QFont(font().family(), 8, QFont::Bold));
 +			p.drawText(
-+				QRect(left + size - 14, top - 1, 16, 16),
++				QRect(left + size - 16, top - 2, 18, 18),
 +				Qt::AlignCenter,
 +				QString::number(std::min(_unread, 99)));
 +		}
 +		p.setPen(QColor(197, 211, 222));
 +		p.setFont(QFont(font().family(), 8));
 +		p.drawText(
-+			QRect(2, 50, width() - 4, 12),
++			QRect(2, 50, width() - 18, 12),
 +			Qt::AlignHCenter | Qt::AlignVCenter,
 +			_name);
 +	}
@@ -541,6 +571,8 @@ index 0000000..7753b2b
 +	int _unread = 0;
 +	int _hop = 0;
 +	bool _active = false;
++	QPushButton *_up = nullptr;
++	QPushButton *_down = nullptr;
 +};
 +
 +} // namespace
@@ -686,12 +718,12 @@ index 0000000..7753b2b
 +			continue;
 +		}
 +		const auto elapsed = now - started;
-+		if (elapsed > 1200) {
++		if (elapsed > 1800) {
 +			static_cast<RailButton*>(widget)->setHop(0);
 +			continue;
 +		}
 +		alive = true;
-+		const auto hop = int(std::sin(elapsed / 140.0) * 6);
++		const auto hop = int(std::sin(elapsed / 110.0) * 10);
 +		static_cast<RailButton*>(widget)->setHop(std::abs(hop));
 +	}
 +	if (!alive) {
@@ -721,6 +753,65 @@ index 0000000..7753b2b
 +	Core::App().saveSettingsDelayed();
 +}
 +
++void AccountRail::moveAccount(not_null<Main::Account*> account, int delta) {
++	auto *layout = _inner ? qobject_cast<QVBoxLayout*>(_inner->layout()) : nullptr;
++	const auto button = _byAccount[account.get()].data();
++	if (!layout || !button) {
++		return;
++	}
++	const auto from = layout->indexOf(button);
++	auto last = -1;
++	for (auto i = 0; i < layout->count(); ++i) {
++		if (layout->itemAt(i)->widget()) {
++			last = i;
++		}
++	}
++	const auto to = std::clamp(from + delta, 0, std::max(last, 0));
++	if (from < 0 || to == from) {
++		return;
++	}
++	layout->removeWidget(button);
++	layout->insertWidget(to, button);
++	saveOrder();
++}
++
++void AccountRail::showRailMenu(
++		not_null<Main::Account*> account,
++		const QPoint &globalPos) {
++	auto *menu = new QMenu(_controller->widget());
++	menu->addAction(QString::fromUtf8("上移"), this, [=] {
++		moveAccount(account, -1);
++	});
++	menu->addAction(QString::fromUtf8("下移"), this, [=] {
++		moveAccount(account, 1);
++	});
++	menu->addSeparator();
++	menu->addAction(QString::fromUtf8("程序内打开聊天窗"), this, [=] {
++		OpenAccountWindow(account, true);
++	});
++	menu->addAction(QString::fromUtf8("程序外打开聊天窗"), this, [=] {
++		OpenAccountWindow(account, false);
++	});
++	menu->addSeparator();
++	menu->addAction(QString::fromUtf8("批量退出群组"), this, [=] {
++		if (account->sessionExists()) {
++			if (const auto window = Core::App().windowFor(account)) {
++				if (const auto session = window->sessionController()) {
++					ShowLeaveGroupsBox(session);
++					return;
++				}
++			}
++			Core::App().domain().maybeActivate(account);
++			ShowLeaveGroupsBox(_controller);
++		}
++	});
++	menu->addAction(QString::fromUtf8("导出此帐号并删除"), this, [=] {
++		ChooseAndExportOne(this, account);
++	});
++	menu->setAttribute(Qt::WA_DeleteOnClose);
++	menu->popup(globalPos);
++}
++
 +void AccountRail::rebuild() {
 +	if (_rebuilding) {
 +		scheduleRebuild();
@@ -737,6 +828,7 @@ index 0000000..7753b2b
 +	_byAccount.clear();
 +	_pressButton = nullptr;
 +	_dragging = false;
++	_placeholder = nullptr;
 +	// setWidget() deletes the old row and sends a palette event into
 +	// eventFilter while that row is already freed. Drop it first.
 +	_inner = nullptr;
@@ -774,12 +866,26 @@ index 0000000..7753b2b
 +			unread,
 +			account == current);
 +		button->installEventFilter(this);
++		button->setContextMenuPolicy(Qt::CustomContextMenu);
 +		_byAccount[account.get()] = button;
 +		QObject::connect(button, &QPushButton::clicked, this, [=] {
 +			if (_dragging) {
 +				return;
 +			}
 +			Core::App().domain().maybeActivate(account);
++		});
++		QObject::connect(
++			button,
++			&QWidget::customContextMenuRequested,
++			this,
++			[=](const QPoint &pos) {
++				showRailMenu(account, button->mapToGlobal(pos));
++			});
++		QObject::connect(button->upButton(), &QPushButton::clicked, this, [=] {
++			moveAccount(account, -1);
++		});
++		QObject::connect(button->downButton(), &QPushButton::clicked, this, [=] {
++			moveAccount(account, 1);
 +		});
 +		layout->addWidget(button);
 +		contentHeight += 66;
@@ -806,10 +912,6 @@ index 0000000..7753b2b
 +	if (_rebuilding || !watched || !event || !_scroll || !_inner) {
 +		return false;
 +	}
-+	const auto layout = _inner->layout();
-+	if (!layout) {
-+		return false;
-+	}
 +	const auto button = qobject_cast<QWidget*>(watched);
 +	if (!button || button->parentWidget() != _inner) {
 +		return false;
@@ -825,48 +927,70 @@ index 0000000..7753b2b
 +	if (!known) {
 +		return false;
 +	}
++	auto *box = qobject_cast<QVBoxLayout*>(_inner->layout());
++	if (!box) {
++		return false;
++	}
 +	if (event->type() == QEvent::MouseButtonPress) {
 +		const auto mouse = static_cast<QMouseEvent*>(event);
 +		if (mouse->button() == Qt::LeftButton) {
 +			_pressButton = button;
 +			_pressY = mouse->globalPos().y();
++			_pressOffset = button->mapFromGlobal(mouse->globalPos()).y();
 +			_dragging = false;
 +		}
 +	} else if (event->type() == QEvent::MouseMove && _pressButton == button) {
 +		const auto mouse = static_cast<QMouseEvent*>(event);
-+		if (std::abs(mouse->globalPos().y() - _pressY) < 12) {
++		if (!_dragging
++			&& std::abs(mouse->globalPos().y() - _pressY) < 8) {
 +			return false;
 +		}
-+		_dragging = true;
-+		auto *layout = qobject_cast<QVBoxLayout*>(_inner->layout());
-+		if (!layout) {
-+			return false;
++		if (!_dragging) {
++			_dragging = true;
++			const auto from = box->indexOf(button);
++			box->removeWidget(button);
++			if (!_placeholder) {
++				_placeholder = new QWidget(_inner);
++				_placeholder->setFixedHeight(64);
++			}
++			box->insertWidget(std::max(from, 0), _placeholder);
++			button->raise();
 +		}
-+		const auto from = layout->indexOf(button);
-+		const auto localY = _inner->mapFromGlobal(mouse->globalPos()).y();
++		const auto localY = _inner->mapFromGlobal(mouse->globalPos()).y()
++			- _pressOffset;
++		button->move(button->x(), localY);
 +		auto to = 0;
-+		auto widgets = 0;
-+		for (auto i = 0; i < layout->count(); ++i) {
-+			const auto widget = layout->itemAt(i)->widget();
-+			if (!widget) {
++		for (auto i = 0; i < box->count(); ++i) {
++			const auto widget = box->itemAt(i)->widget();
++			if (!widget || widget == _placeholder) {
 +				continue;
 +			}
-+			++widgets;
-+			if (localY > widget->geometry().center().y()) {
-+				to = widgets - 1;
++			if (localY + button->height() / 2 > widget->geometry().center().y()) {
++				to = i + 1;
 +			}
 +		}
-+		if (from >= 0 && to >= 0 && from != to) {
-+			layout->removeWidget(button);
-+			layout->insertWidget(to, button);
++		const auto place = box->indexOf(_placeholder);
++		if (place >= 0 && place != to) {
++			box->removeWidget(_placeholder);
++			box->insertWidget(std::min(to, box->count()), _placeholder);
 +		}
 +		return true;
-+	} else if (event->type() == QEvent::MouseButtonRelease && _pressButton == button) {
++	} else if (event->type() == QEvent::MouseButtonRelease
++		&& _pressButton == button) {
 +		const auto dragged = _dragging;
 +		_pressButton = nullptr;
++		_dragging = false;
 +		if (dragged) {
++			const auto place = _placeholder
++				? box->indexOf(_placeholder)
++				: box->indexOf(button);
++			if (_placeholder) {
++				box->removeWidget(_placeholder);
++				_placeholder->deleteLater();
++				_placeholder = nullptr;
++			}
++			box->insertWidget(std::max(place, 0), button);
 +			saveOrder();
-+			_dragging = false;
 +			return true;
 +		}
 +	}
@@ -930,10 +1054,10 @@ index 0000000..7753b2b
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_account_rail.h b/Telegram/SourceFiles/custom/custom_account_rail.h
 new file mode 100644
-index 0000000..e713c48
+index 0000000..c9044dc
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_account_rail.h
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,75 @@
 +#pragma once
 +
 +#include "ui/rp_widget.h"
@@ -982,6 +1106,8 @@ index 0000000..e713c48
 +	void tickBounce();
 +	void showLoginSheet();
 +	void placeLoginSheet();
++	void moveAccount(not_null<Main::Account*> account, int delta);
++	void showRailMenu(not_null<Main::Account*> account, const QPoint &globalPos);
 +
 +	const not_null<Window::SessionController*> _controller;
 +	bool _rebuilding = false;
@@ -996,7 +1122,9 @@ index 0000000..e713c48
 +	QTimer *_bounce = nullptr;
 +	QString _query;
 +	QWidget *_pressButton = nullptr;
++	QWidget *_placeholder = nullptr;
 +	int _pressY = 0;
++	int _pressOffset = 0;
 +	bool _dragging = false;
 +	std::map<Main::Account*, QPointer<QWidget>> _byAccount;
 +	std::map<Main::Account*, int> _lastUnread;
@@ -1007,10 +1135,10 @@ index 0000000..e713c48
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.cpp b/Telegram/SourceFiles/custom/custom_control.cpp
 new file mode 100644
-index 0000000..b56d661
+index 0000000..b40746d
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.cpp
-@@ -0,0 +1,1034 @@
+@@ -0,0 +1,1166 @@
 +#include "custom/custom_control.h"
 +
 +#include "api/api_common.h"
@@ -1020,10 +1148,15 @@ index 0000000..b56d661
 +#include "custom/custom_export.h"
 +#include "custom/custom_import.h"
 +#include "mainwindow.h"
++#include "data/data_channel.h"
++#include "data/data_chat.h"
++#include "data/data_folder.h"
 +#include "data/data_peer.h"
 +#include "data/data_peer_id.h"
 +#include "data/data_session.h"
 +#include "data/data_user.h"
++#include "dialogs/dialogs_indexed_list.h"
++#include "dialogs/dialogs_main_list.h"
 +#include "history/history.h"
 +#include "lang/lang_keys.h"
 +#include "platform/platform_specific.h"
@@ -1990,6 +2123,129 @@ index 0000000..b56d661
 +	return true;
 +}
 +
++void OpenAccountWindow(not_null<Main::Account*> account, bool insideApp) {
++	if (!account->sessionExists()) {
++		Ui::Toast::Show(QString::fromUtf8("这个号还没登录"));
++		return;
++	}
++	auto *window = Core::App().ensureSeparateWindowFor(account);
++	const auto widget = window->widget();
++	if (insideApp) {
++		widget->setWindowFlag(Qt::Tool, true);
++		if (widget->width() < 360 || widget->height() < 480) {
++			widget->resize(480, 720);
++		}
++	} else {
++		widget->setWindowFlag(Qt::Tool, false);
++		widget->setWindowFlag(Qt::Window, true);
++	}
++	widget->show();
++	widget->raise();
++	window->activate();
++}
++
++void ShowLeaveGroupsBox(not_null<Window::SessionController*> controller) {
++	auto &session = controller->session();
++	std::vector<not_null<PeerData*>> groups;
++	const auto addList = [&](not_null<Dialogs::IndexedList*> list) {
++		for (const auto &row : *list) {
++			const auto history = row->history();
++			if (!history) {
++				continue;
++			}
++			const auto peer = history->peer;
++			if (peer->isBroadcast()) {
++				continue;
++			}
++			if (const auto channel = peer->asChannel()) {
++				if (!channel->isMegagroup() || !channel->amIn()) {
++					continue;
++				}
++			} else if (const auto chat = peer->asChat()) {
++				if (!chat->amIn()) {
++					continue;
++				}
++			} else {
++				continue;
++			}
++			groups.push_back(peer);
++		}
++	};
++	addList(session.data().chatsList()->indexed());
++	if (const auto folder = session.data().folderLoaded(Data::Folder::kId)) {
++		addList(session.data().chatsList(folder)->indexed());
++	}
++	if (groups.empty()) {
++		Ui::Toast::Show(QString::fromUtf8("这个号没有可退出的群组"));
++		return;
++	}
++
++	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
++		box->setTitle(rpl::single(QString::fromUtf8("批量退出群组")));
++		box->addRow(object_ptr<Ui::FlatLabel>(
++			box,
++			rpl::single(QString::fromUtf8(
++				"勾选要退的群，点一并退出。频道不在这里。")),
++			st::boxLabel));
++		const auto search = box->addRow(object_ptr<Ui::InputField>(
++			box,
++			st::defaultInputField,
++			rpl::single(QString::fromUtf8("搜索群名称"))));
++		const auto checks = std::make_shared<
++			std::vector<std::pair<not_null<PeerData*>, Ui::Checkbox*>>>();
++		for (const auto peer : groups) {
++			const auto check = box->addRow(object_ptr<Ui::Checkbox>(
++				box,
++				peer->name(),
++				false,
++				st::defaultBoxCheckbox));
++			checks->push_back({ peer, check });
++		}
++		search->changes(
++		) | rpl::on_next([=] {
++			const auto q = search->getLastText().trimmed();
++			for (const auto &[peer, check] : *checks) {
++				check->setVisible(
++					q.isEmpty()
++					|| peer->name().contains(q, Qt::CaseInsensitive));
++			}
++		}, search->lifetime());
++		box->addButton(rpl::single(QString::fromUtf8("全选")), [=] {
++			for (const auto &[peer, check] : *checks) {
++				if (!check->isHidden()) {
++					check->setChecked(true);
++				}
++			}
++		});
++		box->addButton(rpl::single(QString::fromUtf8("一并退出")), [=] {
++			std::vector<not_null<PeerData*>> picked;
++			for (const auto &[peer, check] : *checks) {
++				if (check->checked() && !check->isHidden()) {
++					picked.push_back(peer);
++				}
++			}
++			if (picked.empty()) {
++				Ui::Toast::Show(QString::fromUtf8("没有勾选群组"));
++				return;
++			}
++			box->closeBox();
++			auto left = 0;
++			for (const auto peer : picked) {
++				if (const auto channel = peer->asChannel()) {
++					peer->session().api().leaveChannel(channel);
++					peer->session().data().deleteConversationLocally(peer);
++					++left;
++				} else {
++					peer->session().api().deleteConversation(peer, false);
++					++left;
++				}
++			}
++			Ui::Toast::Show(QString::fromUtf8("正在退出 %1 个群组").arg(left));
++		}, st::attentionBoxButton);
++		box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
++	}));
++}
++
 +void ShowControlPanel(not_null<Window::SessionController*> controller) {
 +	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
 +		box->setTitle(rpl::single(QString::fromUtf8("控制面板")));
@@ -2021,6 +2277,10 @@ index 0000000..b56d661
 +				"机器人按钮在 TelegramForcePortable/bot/run，改那个文件不用重新编译。"
 +				"里面可以导入、导出、看列表、发消息，再加按钮也只改这个文件。")),
 +			st::boxLabel));
++		box->addButton(rpl::single(QString::fromUtf8("批量退群")), [=] {
++			box->closeBox();
++			ShowLeaveGroupsBox(controller);
++		});
 +		box->addButton(tr::lng_settings_save(), [=] {
 +			auto n = limit->getLastText().trimmed().toInt();
 +			if (n <= 0) {
@@ -2047,10 +2307,10 @@ index 0000000..b56d661
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_control.h b/Telegram/SourceFiles/custom/custom_control.h
 new file mode 100644
-index 0000000..050d7d1
+index 0000000..15a59f9
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_control.h
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,66 @@
 +#pragma once
 +
 +namespace Main {
@@ -2065,6 +2325,8 @@ index 0000000..050d7d1
 +namespace Custom {
 +
 +void ShowControlPanel(not_null<Window::SessionController*> controller);
++void ShowLeaveGroupsBox(not_null<Window::SessionController*> controller);
++void OpenAccountWindow(not_null<Main::Account*> account, bool insideApp);
 +
 +void StartBotIfEnabled();
 +
@@ -2117,14 +2379,15 @@ index 0000000..050d7d1
 +} // namespace Custom
 diff --git a/Telegram/SourceFiles/custom/custom_export.cpp b/Telegram/SourceFiles/custom/custom_export.cpp
 new file mode 100644
-index 0000000..2e5696d
+index 0000000..5258eb4
 --- /dev/null
 +++ b/Telegram/SourceFiles/custom/custom_export.cpp
-@@ -0,0 +1,626 @@
+@@ -0,0 +1,732 @@
 +#include "custom/custom_export.h"
 +
 +#include "custom/custom_control.h"
 +#include "custom/custom_import.h"
++#include "base/basic_types.h"
 +#include "core/application.h"
 +#include "core/file_utilities.h"
 +#include "core/utils.h"
@@ -2153,6 +2416,10 @@ index 0000000..2e5696d
 +
 +#include <array>
 +#include <cstring>
++#include <memory>
++
++#include <crl/crl_async.h>
++#include <crl/crl_on_main.h>
 +
 +#include <QtCore/QDataStream>
 +#include <QtCore/QDateTime>
@@ -2164,6 +2431,7 @@ index 0000000..2e5696d
 +#include <QtCore/QJsonObject>
 +#include <QtCore/QProcess>
 +#include <QtCore/QRegularExpression>
++#include <QtCore/QTimer>
 +#include <QtCore/QTemporaryDir>
 +#include <sqlite3.h>
 +
@@ -2171,6 +2439,11 @@ index 0000000..2e5696d
 +
 +void DeleteExportedAccounts(
 +	const std::vector<not_null<Main::Account*>> &accounts);
++
++int PrepareExportFolders(
++	const std::vector<not_null<Main::Account*>> &accounts,
++	const QString &root,
++	QString *error);
 +
 +namespace {
 +
@@ -2272,10 +2545,6 @@ index 0000000..2e5696d
 +	}
 +	sqlite3_close(db);
 +	return ok;
-+}
-+
-+bool ZipChildren(const QString &folder, const QString &zipPath) {
-+	return ZipFolder(folder, zipPath);
 +}
 +
 +[[nodiscard]] QString TelethonString(qint32 dcId, const QByteArray &authKey) {
@@ -2530,83 +2799,153 @@ index 0000000..2e5696d
 +			error.isEmpty() ? QString("empty") : error));
 +}
 +
++void FinishFileDialog() {
++	crl::on_main(&Core::App(), [] {
++		crl::on_main(&Core::App(), [] {
++			SetFileDialogActive(false);
++		});
++	});
++}
++
++void OfferSaveZip(
++		const QString &zipPath,
++		const std::vector<not_null<Main::Account*>> &accounts,
++		int count,
++		const QString &botError) {
++	SetFileDialogActive(true);
++	auto *process = new QProcess(&Core::App());
++	const auto name = QFileInfo(zipPath).fileName();
++	const auto script = QString::fromUtf8(
++		"POSIX path of (choose file name with prompt \"保存帐号包\" default name \"%1\")"
++	).arg(name);
++	QObject::connect(
++		process,
++		&QProcess::finished,
++		&Core::App(),
++		[=](int, QProcess::ExitStatus) {
++			auto saveTo = QString::fromUtf8(
++				process->readAllStandardOutput()).trimmed();
++			process->deleteLater();
++			QTimer::singleShot(0, &Core::App(), [=] {
++				FinishFileDialog();
++				if (saveTo.isEmpty()) {
++					QFile::remove(zipPath);
++					Ui::Toast::Show(QString::fromUtf8("已取消，号还在客户端"));
++					return;
++				}
++				if (!saveTo.endsWith(u".zip"_q, Qt::CaseInsensitive)) {
++					saveTo += u".zip"_q;
++				}
++				QFile::remove(saveTo);
++				if (!QFile::copy(zipPath, saveTo)
++					&& !QFile::rename(zipPath, saveTo)) {
++					ShowExportResult(0, QString::fromUtf8("保存失败"));
++					return;
++				}
++				QFile::remove(zipPath);
++				DeleteExportedAccounts(accounts);
++				Ui::Toast::Show(QString::fromUtf8(
++					"已导出 %1 个帐号到 %2").arg(count).arg(saveTo));
++			});
++		});
++	QObject::connect(
++		process,
++		&QProcess::errorOccurred,
++		&Core::App(),
++		[=](QProcess::ProcessError error) {
++			if (error != QProcess::FailedToStart) {
++				return;
++			}
++			process->deleteLater();
++			FinishFileDialog();
++			const auto fallback = QDir::homePath() + '/' + name;
++			QFile::remove(fallback);
++			if (QFile::copy(zipPath, fallback) || QFile::rename(zipPath, fallback)) {
++				QFile::remove(zipPath);
++				DeleteExportedAccounts(accounts);
++				Ui::Toast::Show(QString::fromUtf8(
++					"系统保存窗口没打开，已存到 %1").arg(fallback));
++			} else {
++				QFile::remove(zipPath);
++				Ui::Toast::Show(QString::fromUtf8(
++					"机器人没发出去，也没有保存文件。号还在。%1").arg(botError));
++			}
++		});
++	process->start(u"/usr/bin/osascript"_q, { u"-e"_q, script });
++}
++
 +void StartExport(
 +		const std::vector<not_null<Main::Account*>> &accounts,
 +		QWidget *parent) {
++	(void)parent;
 +	if (accounts.empty()) {
 +		Ui::Toast::Show(QString::fromUtf8("没有选中帐号"));
 +		return;
 +	}
++	Ui::Toast::Show(QString::fromUtf8("正在导出，请稍等"));
++	SetFileDialogActive(true);
 +	const auto stamp = QDateTime::currentDateTime().toString(
 +		"yyyyMMdd-HHmmss");
 +	const auto dir = cWorkingDir() + u"bot/outbox/"_q;
 +	QDir().mkpath(dir);
 +	const auto path = dir + u"导出帐号-"_q + stamp + u".zip"_q;
++	auto temp = std::make_shared<QTemporaryDir>();
++	if (!temp->isValid()) {
++		FinishFileDialog();
++		ShowExportResult(0, u"temp dir"_q);
++		return;
++	}
 +	QString error;
-+	const auto n = ExportAndDeleteAccounts(accounts, path, &error);
++	const auto n = PrepareExportFolders(accounts, temp->path(), &error);
 +	if (n <= 0) {
 +		QFile::remove(path);
++		FinishFileDialog();
 +		ShowExportResult(0, error);
 +		return;
 +	}
-+	QString botError;
-+	if (SendExportViaBot(path, &botError)) {
-+		QFile::remove(path);
-+		DeleteExportedAccounts(accounts);
-+		ShowExportResult(n, QString());
-+		return;
-+	}
 +	const auto keep = accounts;
-+	const auto tempPath = path;
-+	const auto count = n;
-+	FileDialog::GetWritePath(
-+		parent ? parent : Core::App().getFileDialogParent(),
-+		QString::fromUtf8("保存帐号包"),
-+		"Zip (*.zip);;All files (*.*)",
-+		QDir::homePath() + '/' + QFileInfo(tempPath).fileName(),
-+		[=](QString &&saveTo) {
-+			if (saveTo.isEmpty()) {
-+				QFile::remove(tempPath);
-+				Ui::Toast::Show(QString::fromUtf8("已取消，号还在客户端"));
++	const auto root = temp->path();
++	crl::async([temp, root, path, keep, n] {
++		QString zipError;
++		const auto zipped = ZipFolder(root, path);
++		if (!zipped) {
++			zipError = u"zip failed"_q;
++		}
++		QString botError;
++		const auto sent = zipped && SendExportViaBot(path, &botError);
++		crl::on_main(&Core::App(), [=] {
++			(void)temp;
++			if (!zipped) {
++				QFile::remove(path);
++				ShowExportResult(0, zipError);
++				FinishFileDialog();
 +				return;
 +			}
-+			QFile::remove(saveTo);
-+			if (!QFile::copy(tempPath, saveTo) && !QFile::rename(tempPath, saveTo)) {
-+				ShowExportResult(0, QString::fromUtf8("保存失败"));
++			if (sent) {
++				QFile::remove(path);
++				DeleteExportedAccounts(keep);
++				ShowExportResult(n, QString());
++				FinishFileDialog();
 +				return;
 +			}
-+			QFile::remove(tempPath);
-+			DeleteExportedAccounts(keep);
-+			Ui::Toast::Show(QString::fromUtf8(
-+				"已导出 %1 个帐号到 %2").arg(count).arg(saveTo));
-+		},
-+		[=] {
-+			QFile::remove(tempPath);
-+			Ui::Toast::Show(QString::fromUtf8(
-+				"机器人没发出去，也没有保存文件。号还在。%1").arg(botError));
++			OfferSaveZip(path, keep, n, botError);
 +		});
++	});
 +}
 +
 +} // namespace
 +
-+int ExportAndDeleteAccounts(
++int PrepareExportFolders(
 +		const std::vector<not_null<Main::Account*>> &accounts,
-+		const QString &zipPath,
++		const QString &root,
 +		QString *error) {
 +	if (accounts.empty()) {
 +		if (error) *error = "empty";
 +		return 0;
 +	}
-+	QTemporaryDir temp;
-+	if (!temp.isValid()) {
-+		if (error) *error = "temp dir";
-+		return 0;
-+	}
-+	const auto root = temp.path();
 +	QDir().mkpath(root);
-+
 +	const auto indexRoot = LoadIndex();
-+	std::vector<PreparedAccount> prepared;
++	auto prepared = 0;
 +	for (const auto account : accounts) {
 +		if (!account->sessionExists()) {
 +			continue;
@@ -2625,17 +2964,32 @@ index 0000000..2e5696d
 +		if (!WriteOneFolder(one, root)) {
 +			continue;
 +		}
-+		prepared.push_back(std::move(one));
++		++prepared;
 +	}
-+	if (prepared.empty()) {
-+		if (error) *error = QString::fromUtf8("没有可导出的已登录帐号");
++	if (!prepared && error) {
++		*error = QString::fromUtf8("没有可导出的已登录帐号");
++	}
++	return prepared;
++}
++
++int ExportAndDeleteAccounts(
++		const std::vector<not_null<Main::Account*>> &accounts,
++		const QString &zipPath,
++		QString *error) {
++	QTemporaryDir temp;
++	if (!temp.isValid()) {
++		if (error) *error = "temp dir";
 +		return 0;
 +	}
-+	if (!ZipChildren(root, zipPath)) {
++	const auto n = PrepareExportFolders(accounts, temp.path(), error);
++	if (n <= 0) {
++		return 0;
++	}
++	if (!ZipFolder(temp.path(), zipPath)) {
 +		if (error) *error = "zip failed";
 +		return 0;
 +	}
-+	return int(prepared.size());
++	return n;
 +}
 +
 +void DeleteExportedAccounts(
@@ -2661,12 +3015,26 @@ index 0000000..2e5696d
 +	RemoveIndexKeys(removeIds);
 +	// Drop the account from this client only. logout() tells the server to
 +	// kill the session, which makes the exported tdata useless on reimport.
-+	for (const auto account : deleting) {
-+		account->forcedLogOut();
-+	}
++	// One account per turn so the window server is not asked to tear
++	// several windows down in the same event.
 +	if (active) {
-+		active->forcedLogOut();
++		deleting.push_back(active);
 +	}
++	auto queue = std::make_shared<std::vector<not_null<Main::Account*>>>(
++		std::move(deleting));
++	const auto step = std::make_shared<Fn<void()>>();
++	*step = [=] {
++		if (queue->empty()) {
++			return;
++		}
++		const auto account = queue->front();
++		queue->erase(queue->begin());
++		if (account->sessionExists()) {
++			account->forcedLogOut();
++		}
++		crl::on_main(&Core::App(), *step);
++	};
++	crl::on_main(&Core::App(), *step);
 +}
 +
 +void ChooseAndExportOne(
@@ -5720,7 +6088,7 @@ index eef6d0e..c18f42f 100644
  	void activate(not_null<Main::Account*> account);
  	void addActivated(MTP::Environment environment, bool newWindow = false);
 diff --git a/Telegram/SourceFiles/mainwidget.cpp b/Telegram/SourceFiles/mainwidget.cpp
-index baf29c7..9241c6a 100644
+index baf29c7..1224e36 100644
 --- a/Telegram/SourceFiles/mainwidget.cpp
 +++ b/Telegram/SourceFiles/mainwidget.cpp
 @@ -29,6 +29,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
@@ -6102,7 +6470,7 @@ index baf29c7..9241c6a 100644
  			st::columnMaximalWidthThird));
  		Core::App().saveSettingsDelayed();
  	};
-@@ -2931,6 +3092,77 @@ void MainWidget::ensureThirdColumnResizeAreaCreated() {
+@@ -2931,6 +3092,98 @@ void MainWidget::ensureThirdColumnResizeAreaCreated() {
  		std::move(moveFinishedCallback));
  }
  
@@ -6164,15 +6532,36 @@ index baf29c7..9241c6a 100644
 +		});
 +		_controlButton = button;
 +	}
++	if (!_leaveGroupsButton) {
++		const auto leave = new QPushButton(QString::fromUtf8("退群"), this);
++		leave->setCursor(Qt::PointingHandCursor);
++		leave->setToolTip(QString::fromUtf8("勾选多个群组一并退出"));
++		leave->setStyleSheet(
++			"QPushButton{background:#c0392b;color:#fff;border:0;"
++			"border-radius:6px;font-size:11px;padding:2px 6px;}"
++			"QPushButton:hover{background:#e74c3c;}");
++		QObject::connect(leave, &QPushButton::clicked, this, [=] {
++			Custom::ShowLeaveGroupsBox(_controller);
++		});
++		_leaveGroupsButton = leave;
++	}
 +	if (_dialogs->isHidden()) {
 +		_controlButton->hide();
++		_leaveGroupsButton->hide();
 +		return;
 +	}
++	_leaveGroupsButton->setGeometry(
++		_dialogs->x() + _dialogs->width() - 104,
++		_dialogs->y() + 8,
++		48,
++		26);
 +	_controlButton->setGeometry(
 +		_dialogs->x() + _dialogs->width() - 52,
 +		_dialogs->y() + 8,
 +		44,
 +		26);
++	_leaveGroupsButton->show();
++	_leaveGroupsButton->raise();
 +	_controlButton->show();
 +	_controlButton->raise();
 +}
@@ -6180,7 +6569,7 @@ index baf29c7..9241c6a 100644
  void MainWidget::updateDialogsWidthAnimated() {
  	const auto nochat = !_controller->mainSectionShown();
  	if (!_dialogs || Core::App().settings().dialogsWidthRatio(nochat) > 0) {
-@@ -3169,12 +3401,14 @@ void MainWidget::updateWindowAdaptiveLayout() {
+@@ -3169,12 +3422,14 @@ void MainWidget::updateWindowAdaptiveLayout() {
  		//	&& chatWidth >= _history->minimalWidthForTabbedSelectorSection()) {
  		//	chatWidth -= _history->tabbedSelectorSectionWidth();
  		//}
@@ -6198,7 +6587,7 @@ index baf29c7..9241c6a 100644
  			layout.chatWidth = layout.bodyWidth - layout.dialogsWidth;
  			dialogsWidthRatio = float64(layout.dialogsWidth) / layout.bodyWidth;
  		}
-@@ -3259,6 +3493,32 @@ bool MainWidget::animatingShow() const {
+@@ -3259,6 +3514,32 @@ bool MainWidget::animatingShow() const {
  	return _showAnimation != nullptr;
  }
  
@@ -6231,7 +6620,7 @@ index baf29c7..9241c6a 100644
  bool MainWidget::isOneColumn() const {
  	return _controller->adaptive().isOneColumn();
  }
-@@ -3280,4 +3540,4 @@ MainWidget *main() {
+@@ -3280,4 +3561,4 @@ MainWidget *main() {
  	return nullptr;
  }
  
@@ -6239,7 +6628,7 @@ index baf29c7..9241c6a 100644
 \ No newline at end of file
 +} // namespace App
 diff --git a/Telegram/SourceFiles/mainwidget.h b/Telegram/SourceFiles/mainwidget.h
-index 82a35ec..876719e 100644
+index 82a35ec..6218b83 100644
 --- a/Telegram/SourceFiles/mainwidget.h
 +++ b/Telegram/SourceFiles/mainwidget.h
 @@ -72,6 +72,11 @@ template <typename Widget>
@@ -6294,17 +6683,18 @@ index 82a35ec..876719e 100644
  	object_ptr<Window::SectionWidget> _mainSection = { nullptr };
  	object_ptr<Window::SectionWidget> _thirdSection = { nullptr };
  	std::shared_ptr<Window::SectionMemento> _thirdSectionFromStack;
-@@ -358,6 +373,9 @@ private:
+@@ -358,6 +373,10 @@ private:
  	object_ptr<Ui::PlainShadow> _thirdShadow = { nullptr };
  	object_ptr<Ui::ResizeArea> _firstColumnResizeArea = { nullptr };
  	object_ptr<Ui::ResizeArea> _thirdColumnResizeArea = { nullptr };
 +	object_ptr<Ui::ResizeArea> _searchResizeArea = { nullptr };
 +	object_ptr<Ui::ResizeArea> _filtersResizeArea = { nullptr };
 +	QWidget *_controlButton = nullptr;
++	QWidget *_leaveGroupsButton = nullptr;
  
  	base::weak_ptr<Calls::Call> _currentCall;
  	base::weak_ptr<Calls::GroupCall> _currentGroupCall;
-@@ -391,4 +409,4 @@ private:
+@@ -391,4 +410,4 @@ private:
  
  namespace App {
  MainWidget *main();
