@@ -2833,19 +2833,21 @@ index 0000000..5258eb4
 +					Ui::Toast::Show(QString::fromUtf8("已取消，号还在客户端"));
 +					return;
 +				}
-+				if (!saveTo.endsWith(u".zip"_q, Qt::CaseInsensitive)) {
-+					saveTo += u".zip"_q;
-+				}
-+				QFile::remove(saveTo);
-+				if (!QFile::copy(zipPath, saveTo)
-+					&& !QFile::rename(zipPath, saveTo)) {
++				const auto destination = saveTo.endsWith(
++					u".zip"_q,
++					Qt::CaseInsensitive)
++					? saveTo
++					: (saveTo + u".zip"_q);
++				QFile::remove(destination);
++				if (!QFile::copy(zipPath, destination)
++					&& !QFile::rename(zipPath, destination)) {
 +					ShowExportResult(0, QString::fromUtf8("保存失败"));
 +					return;
 +				}
 +				QFile::remove(zipPath);
 +				DeleteExportedAccounts(accounts);
 +				Ui::Toast::Show(QString::fromUtf8(
-+					"已导出 %1 个帐号到 %2").arg(count).arg(saveTo));
++					"已导出 %1 个帐号到 %2").arg(count).arg(destination));
 +			});
 +		});
 +	QObject::connect(
